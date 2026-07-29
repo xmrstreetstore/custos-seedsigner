@@ -25,8 +25,86 @@ TYPE_ELECTRUM = 0x40
 EXPORT_PLAINTEXT_ALLOWED = 0x01
 
 
+#: Where pcsc-lite puts its client socket, and the daemon that creates it.
+PCSCD_SOCKET = "/run/pcscd/pcscd.comm"
+PCSCD_BIN = "/usr/sbin/pcscd"
+TTY_READER = "/dev/ttyAMA0"
+
+
 class SeedKeeperError(Exception):
     """Anything the user needs to be told about, already phrased for the screen."""
+
+
+def _facts() -> str:
+    """
+    The three things that decide whether the reader can work, in one short line.
+
+    This device has no console, no network and no serial port to spare, so the
+    screen is the only place a diagnosis can ever appear. Without this, every
+    distinct failure below looks identical to the user.
+    """
+    import os
+
+    # Existing and openable are different failures with the same symptom: a
+    # missing node means the kernel never bound the UART, while an existing
+    # node that will not open means something else holds it.
+    if not os.path.exists(TTY_READER):
+        tty = "MISSING"
+    else:
+        try:
+            os.close(os.open(TTY_READER, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK))
+            tty = "ok"
+        except OSError as exc:
+            tty = f"errno{exc.errno}"
+
+    return "tty:{} pcscd:{} bin:{}".format(
+        tty,
+        "up" if os.path.exists(PCSCD_SOCKET) else "down",
+        "ok" if os.path.exists(PCSCD_BIN) else "MISSING",
+    )
+
+
+def _start_pcscd(timeout: float = 12.0) -> str:
+    """
+    Make sure something is serving PC/SC, starting the daemon if not.
+
+    S01pcscd starts it at boot, but if that did not happen - or the daemon died
+    - nothing else on this device will notice. Starting it here is also the
+    safer moment: a *serial* reader is probed once, when pcscd starts, and
+    never again, so a daemon that came up before /dev was ready would never
+    find the SEC1210 no matter how long you waited.
+
+    Returns a short string describing what happened, for the error screen.
+    """
+    import os
+    import subprocess
+    import time
+
+    if os.path.exists(PCSCD_SOCKET):
+        return "already up"
+    if not os.path.exists(PCSCD_BIN):
+        return "pcscd not installed"
+
+    try:
+        proc = subprocess.run(
+            [PCSCD_BIN], capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return "pcscd did not return"
+    except Exception as exc:                       # noqa: BLE001 - surfaced to screen
+        return f"could not run pcscd: {exc}"
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(PCSCD_SOCKET):
+            return "started"
+        time.sleep(0.25)
+
+    # It ran but never created the socket. Whatever it printed is the reason.
+    said = " ".join((proc.stdout or "").split() + (proc.stderr or "").split())
+    if said:
+        return f"pcscd exited {proc.returncode}: {said[:120]}"
+    return f"pcscd exited {proc.returncode}, no socket"
 
 
 def connect():
@@ -41,17 +119,26 @@ def connect():
     except ImportError as exc:
         raise SeedKeeperError(f"pysatochip missing: {exc}") from exc
 
+    # Bring the daemon up before asking it anything. Without this, a pcscd that
+    # is not running produces SCARD_E_NO_SERVICE, which reads like a reader
+    # fault and sends you looking at the hardware.
+    pcscd_state = _start_pcscd()
+
     try:
         from smartcard.System import readers
         if not readers():
             raise SeedKeeperError(
-                "No card reader found.\n\nCheck the SEC1210 hat is seated, and that "
-                "nothing else is holding the serial port."
+                "No card reader found.\n\n"
+                f"pcscd: {pcscd_state}\n{_facts()}\n\n"
+                "Check the SEC1210 hat is seated."
             )
     except SeedKeeperError:
         raise
     except Exception as exc:                       # noqa: BLE001 - surfaced to screen
-        raise SeedKeeperError(f"Reader check failed:\n{type(exc).__name__}: {exc}") from exc
+        raise SeedKeeperError(
+            f"Reader check failed:\n{type(exc).__name__}\n\n"
+            f"pcscd: {pcscd_state}\n{_facts()}"
+        ) from exc
 
     try:
         connector = CardConnector(client=None, loglevel=logging.WARNING)
