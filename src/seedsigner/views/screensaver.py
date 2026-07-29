@@ -100,8 +100,11 @@ class OpeningSplashScreen(LogoScreen):
         font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.get_top_nav_title_font_size())
         version = Version.get_version_name()
 
-        # The logo png is 240x240, but the actual logo is 70px tall, vertically centered
-        logo_height = 70
+        # The logo png is 240x240, but the artwork inside it is shorter and vertically
+        # centered; the version string is positioned directly below that artwork, so
+        # this has to match it or the text lands on top of the logo.
+        # Custos OS artwork is 140px tall (SeedSigner's own was 70).
+        logo_height = 140
         version_x = int(self.renderer.canvas_width/2)
         version_y = int(self.canvas_height/2) + int(logo_height/2) + logo_offset_y + GUIConstants.COMPONENT_PADDING
         version_max_chars = 20
