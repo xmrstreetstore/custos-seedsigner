@@ -1,16 +1,11 @@
 import logging
-import os
 import random
 import time
 
 from dataclasses import dataclass
-from gettext import gettext as _
 
-from seedsigner.gui.components import Fonts, GUIConstants, load_image
+from seedsigner.gui.components import load_image
 from seedsigner.gui.screens.screen import BaseScreen
-from seedsigner.helpers.version import Version
-from seedsigner.models.settings import Settings
-from seedsigner.models.settings_definition import SettingsConstants
 from seedsigner.views.view import View
 
 logger = logging.getLogger(__name__)
@@ -23,47 +18,22 @@ class LogoScreen(BaseScreen):
         super().__init__()
         self.logo = load_image("logo_black_240.png")
 
-        self.partners = [
-            "hrf",
-        ]
-
-        self.partner_logos: dict = {}
-        for partner in self.partners:
-            logo_url = os.path.join("partners", f"{partner}_logo.png")
-            self.partner_logos[partner] = load_image(logo_url)
-
 
     def _run(self):
         pass
 
 
-    def get_random_partner(self) -> str:
-        return self.partners[random.randrange(len(self.partners))]
-
-
 
 @dataclass
 class OpeningSplashView(View):
-    force_partner_logos: bool|None = None
-
     def run(self):
-        self.run_screen(
-            OpeningSplashScreen,
-            force_partner_logos=self.force_partner_logos
-        )
+        self.run_screen(OpeningSplashScreen)
 
 
 
 class OpeningSplashScreen(LogoScreen):
-    def __init__(self, force_partner_logos=None):
-        self.force_partner_logos = force_partner_logos
-        super().__init__()
-
-
     def _render(self):
         from PIL import Image
-        from seedsigner.controller import Controller
-        controller = Controller.get_instance()
 
         # TODO: Fix for the screenshot generator. When generating screenshots for
         # multiple locales, there is a button still in the canvas from the previous
@@ -71,16 +41,11 @@ class OpeningSplashScreen(LogoScreen):
         # instantiated. This is a hack to clear the screen for now.
         self.clear_screen()
 
-        show_partner_logos = Settings.get_instance().get_value(SettingsConstants.SETTING__PARTNER_LOGOS) == SettingsConstants.OPTION__ENABLED
-        if self.force_partner_logos is not None:
-            show_partner_logos = self.force_partner_logos
-
+        # The splash is the logo and nothing else: no version string, and no
+        # sponsor block. The wordmark is part of the artwork, so there is
+        # nothing left to draw over it and no reason to shift it off centre.
         logo_offset_x = int((self.canvas_width - self.logo.width)/2)
-
-        if show_partner_logos:
-            logo_offset_y = -56
-        else:
-            logo_offset_y = 0
+        logo_offset_y = 0
 
         background = Image.new("RGBA", size=self.logo.size, color="black")
         if not self.renderer.is_screenshot_generator:
@@ -95,51 +60,6 @@ class OpeningSplashScreen(LogoScreen):
         else:
             # Skip animation for the screenshot generator
             self.renderer.canvas.paste(self.logo, (logo_offset_x, logo_offset_y))
-
-        # Display version num below SeedSigner logo
-        font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.get_top_nav_title_font_size())
-        version = Version.get_version_name()
-
-        # The logo png is 240x240, but the artwork inside it is shorter and vertically
-        # centered; the version string is positioned directly below that artwork, so
-        # this has to match it or the text lands on top of the logo.
-        # Custos OS artwork is 140px tall (SeedSigner's own was 70).
-        logo_height = 140
-        version_x = int(self.renderer.canvas_width/2)
-        version_y = int(self.canvas_height/2) + int(logo_height/2) + logo_offset_y + GUIConstants.COMPONENT_PADDING
-        version_max_chars = 20
-        self.renderer.draw.text(xy=(version_x, version_y), text=version[:version_max_chars], font=font, fill=GUIConstants.ACCENT_COLOR, anchor="mt")
-        if len(version) > version_max_chars:
-            # Squeeze a second version display line in if needed
-            self.renderer.draw.text(xy=(version_x, version_y + GUIConstants.get_top_nav_title_font_size()), text=version[version_max_chars:], font=font, fill=GUIConstants.ACCENT_COLOR, anchor="mt")
-
-        if not self.renderer.is_screenshot_generator:
-            self.renderer.show_image()
-
-        if show_partner_logos:
-            if not self.renderer.is_screenshot_generator:
-                # Hold on the version num for a moment
-                time.sleep(1)
-
-            # Set up the partner logo
-            partner_logo: Image.Image = self.partner_logos[self.get_random_partner()]
-            font = Fonts.get_font(GUIConstants.get_top_nav_title_font_name(), GUIConstants.get_body_font_size())
-            # TRANSLATOR_NOTE: This is on the opening splash screen, displayed above the HRF logo
-            sponsor_text = _("With support from:")
-            (left, top, tw, th) = font.getbbox(sponsor_text, anchor="lt")
-
-            x = int((self.renderer.canvas_width) / 2)
-            y = self.canvas_height - GUIConstants.COMPONENT_PADDING - partner_logo.height - int(GUIConstants.COMPONENT_PADDING/2) - th
-            self.renderer.draw.text(xy=(x, y), text=sponsor_text, font=font, fill="#ccc", anchor="mt")
-            self.renderer.canvas.paste(
-                partner_logo,
-                (
-                    int((self.renderer.canvas_width - partner_logo.width) / 2),
-                    y + th + int(GUIConstants.COMPONENT_PADDING/2)
-                )
-            )
-
-            self.renderer.show_image()
 
         if not self.renderer.is_screenshot_generator:
             # Hold on the splash screen for a moment

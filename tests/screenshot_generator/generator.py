@@ -247,8 +247,8 @@ def generate_screenshots(locale):
         )
         add_settings_entries(SettingsConstants.VISIBILITY__HARDWARE)
 
-        settingsqr_data_persistent = f"settings::v1 name=English_noob_mode persistent=E xpub_qr=urca,sta denom=thr network=M qr_density=M sigs=ss scripts=nat xpub_details=E passphrase=E camera=0 compact_seedqr=E bip85=D priv_warn=E dire_warn=E partners=E locale={locale}"
-        settingsqr_data_not_persistent = f"settings::v1 name=Mode_Ephemeral persistent=D xpub_qr=urca,sta denom=thr network=M qr_density=M sigs=ss scripts=nat xpub_details=E passphrase=E camera=0 compact_seedqr=E bip85=D priv_warn=E dire_warn=E partners=E locale={locale}"
+        settingsqr_data_persistent = f"settings::v1 name=English_noob_mode persistent=E xpub_qr=urca,sta denom=thr network=M qr_density=M sigs=ss scripts=nat xpub_details=E passphrase=E camera=0 compact_seedqr=E bip85=D priv_warn=E dire_warn=E locale={locale}"
+        settingsqr_data_not_persistent = f"settings::v1 name=Mode_Ephemeral persistent=D xpub_qr=urca,sta denom=thr network=M qr_density=M sigs=ss scripts=nat xpub_details=E passphrase=E camera=0 compact_seedqr=E bip85=D priv_warn=E dire_warn=E locale={locale}"
 
         # Set up mocks to provide whatever temporary data/state a particular screenshot
         # might need.
@@ -342,9 +342,7 @@ def generate_screenshots(locale):
 
         screenshot_sections = {
             "Main Menu Views": [
-                ScreenshotConfig(OpeningSplashView, dict(force_partner_logos=True), mock_context_manager=mock_version_to_most_recent_release),
-                ScreenshotConfig(OpeningSplashView, dict(force_partner_logos=False), screenshot_name="OpeningSplashView_no_partner_logos", mock_context_manager=mock_version_to_most_recent_release),
-                ScreenshotConfig(OpeningSplashView, dict(force_partner_logos=True),  screenshot_name="OpeningSplashView_current_git_state"),
+                ScreenshotConfig(OpeningSplashView, mock_context_manager=mock_version_to_most_recent_release),
                 ScreenshotConfig(MainMenuView),
                 ScreenshotConfig(MainMenuView, screenshot_name='MainMenuView_SDCardStateChangeToast_removed',  toast_thread=SDCardStateChangeToastManagerThread(action=MicroSD.ACTION__REMOVED, activation_delay=0, duration=0)),
                 ScreenshotConfig(MainMenuView, screenshot_name='MainMenuView_SDCardStateChangeToast_inserted', toast_thread=SDCardStateChangeToastManagerThread(action=MicroSD.ACTION__INSERTED, activation_delay=0, duration=0)),
