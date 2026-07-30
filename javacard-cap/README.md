@@ -11,11 +11,21 @@ one without recording where it came from.
 | File | Source | SHA256 |
 |---|---|---|
 | `SeedKeeper-0.2-official.cap` | [3rdIteration/seedsigner](https://github.com/3rdIteration/seedsigner) `javacard-cap/`, from Satochip's official release | `28dbae3c7c130a6f7d0e6d05f41386ffd93976fd290eaa5d8db708b9903dabcd` |
-| `SeedKeeper-Ndef-v0.2-0.1.cap` | as above, NDEF variant | `ef776360415ee0c64881b1e36339ffba815231aab2406014559d18fdaa632c9b` |
 
-Both were checked against the upstream `javacard-cap.sha256` manifest when imported
-and matched. `javacard-cap.sha256` here is the upstream manifest reduced to the two
-files we ship.
+Checked against the upstream `javacard-cap.sha256` manifest when imported, and it
+matched. `javacard-cap.sha256` here is the upstream manifest reduced to what we ship.
+
+### Deliberately not shipped
+
+The NDEF variant was bundled at first and then dropped, because everything it adds
+is for contactless use and this device has no NFC: the SEC1210 is a contact reader
+on `/dev/ttyAMA0`. Offering it in the install menu meant offering a second,
+near-identically named applet that nothing here can talk to over the air.
+
+If the PN532 is ever fitted, restore it with `git show fbc4de51 --` and put its row
+back. Its provenance was the same upstream directory, NDEF variant, SHA256
+`ef776360415ee0c64881b1e36339ffba815231aab2406014559d18fdaa632c9b`. Nothing else
+needs changing: the install menu lists whatever `.cap` files it finds.
 
 ```bash
 cd javacard-cap && sha256sum -c javacard-cap.sha256
