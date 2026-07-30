@@ -357,8 +357,8 @@ class SettingsConstants:
 
 
     # Hardware config settings
-    DISPLAY_CONFIGURATION__ST7789__240x240 = "st7789_240x240"  # default; original Waveshare 1.3" display hat
-    DISPLAY_CONFIGURATION__ST7789__320x240 = "st7789_320x240"    # natively portrait dimensions; we apply a 90° rotation
+    DISPLAY_CONFIGURATION__ST7789__240x240 = "st7789_240x240"  # original Waveshare 1.3" display hat
+    DISPLAY_CONFIGURATION__ST7789__320x240 = "st7789_320x240"  # default here; natively portrait dimensions, we apply a 90° rotation
     DISPLAY_CONFIGURATION__ILI9341__320x240 = "ili9341_320x240"  # natively portrait dimensions; we apply a 90° rotation
     DISPLAY_CONFIGURATION__ILI9486__480x320 = "ili9486_480x320"  # natively portrait dimensions; we apply a 90° rotation
     ALL_DISPLAY_CONFIGURATIONS = [
@@ -718,7 +718,11 @@ class SettingsDefinition:
                       type=SettingsConstants.TYPE__SELECT_1,
                       visibility=SettingsConstants.VISIBILITY__HARDWARE,
                       selection_options=SettingsConstants.ALL_DISPLAY_CONFIGURATIONS,
-                      default_value=SettingsConstants.DISPLAY_CONFIGURATION__ST7789__240x240),
+                      # Custos ships the 2.8" 320x240 panel, so that is the default
+                      # here rather than stock's 240x240 Waveshare 1.3" hat. Both
+                      # remain selectable; only which one you get without asking
+                      # has changed.
+                      default_value=SettingsConstants.DISPLAY_CONFIGURATION__ST7789__320x240),
 
         SettingsEntry(category=SettingsConstants.CATEGORY__SYSTEM,
                       attr_name=SettingsConstants.SETTING__DISPLAY_COLOR_INVERTED,
