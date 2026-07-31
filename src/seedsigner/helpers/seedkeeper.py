@@ -168,12 +168,30 @@ _PCSCD_NOISE = (
 #: here on is shutdown, so the cause is the last fault line *above* it.
 _PCSCD_EXIT_MARKER = "cleaning "
 
+#: Complaints that say only *that* startup failed, never what. main() logs
+#: these right after the subsystem itself has logged the real cause one line
+#: above: InitializeSocket() prints "Unable to create common socket: <errno>"
+#: and only then does main() print this. Reporting the summary loses the
+#: errno, which is the entire diagnosis - so prefer the line above when there
+#: is one, and fall back to the summary (with its line number) when there is not.
+_PCSCD_VAGUE = ("Error initializing pcscd",)
+
+#: Dropped from the front of a reported line. pcscd prefixes its socket faults
+#: with "Unable to ", which costs ten of the ~38 characters that fit and adds
+#: nothing a reader of an error screen does not already assume.
+_PCSCD_STRIP_PREFIX = "Unable to "
+
 #: What a line has to say to be the reason pcscd stopped. Matched case-folded:
 #: pcscd's --debug output carries no severity labels at all, only
 #: "file.c:line:func() message", and its own wording is inconsistent -
 #: "Error initializing pcscd." next to "SEC1210 init failed." So match on the
 #: words, not on a level, and never on capitalisation.
-_PCSCD_FAULT = ("error", "failed", "cannot", "invalid", "no such", "critical")
+#: "unable" earns its place: InitializeSocket() - the call that actually broke
+#: on the pi0 - words all three of its faults as "Unable to create/bind/listen
+#: common socket", which matches none of the others. Without it that line is
+#: not seen as a fault at all, and the search walks past the cause.
+_PCSCD_FAULT = ("error", "failed", "cannot", "invalid", "no such", "critical",
+                "unable")
 
 
 def _why_pcscd_failed(timeout: float = 8.0) -> str:
@@ -231,13 +249,27 @@ def _why_pcscd_failed(timeout: float = 8.0) -> str:
             lines = lines[:i]
             break
 
-    # Of what remains, its last complaint is the one that stopped it.
-    for line in reversed(lines):
-        if any(noise in line for noise in _PCSCD_NOISE):
-            continue
-        if any(word in line.lower() for word in _PCSCD_FAULT):
-            return _trim_pcscd_line(line)
-    return ""
+    # Of what remains, its last complaint is the one that stopped it - unless
+    # that complaint is a summary, in which case the one immediately above it
+    # is the cause. Only immediately above: walking further back finds earlier
+    # non-fatal grumbles (a reader that failed to initialise does not stop the
+    # daemon) and would report one of those as the reason.
+    faults = [i for i, ln in enumerate(lines)
+              if not any(noise in ln for noise in _PCSCD_NOISE)
+              and any(word in ln.lower() for word in _PCSCD_FAULT)]
+    if not faults:
+        return ""
+
+    last = faults[-1]
+    if any(vague in lines[last] for vague in _PCSCD_VAGUE) and len(faults) > 1:
+        # Adjacency is the whole safeguard. The subsystem logs its cause and
+        # main() summarises it on the very next line, so a real pair is one or
+        # two lines apart. Anything further back is a different event - a
+        # reader that failed to initialise, say, which pcscd survives - and
+        # promoting that would name something that did not stop the daemon.
+        if last - faults[-2] <= 2:
+            return _trim_pcscd_line(lines[faults[-2]])
+    return _trim_pcscd_line(lines[last])
 
 
 def _clear_stale_pcscd_files() -> None:
@@ -303,10 +335,14 @@ def _trim_pcscd_line(line: str) -> str:
     """
     match = _PCSCD_LINE_RE.search(line)
     if match:
-        return f"{match.group(1)}: {match.group(2)}"[:38]
-    if "()" in line:
-        line = line.split("()", 1)[1].lstrip(": ")
-    return line[:38]
+        lineno, message = match.group(1), match.group(2)
+    else:
+        lineno = ""
+        message = line.split("()", 1)[1].lstrip(": ") if "()" in line else line
+
+    if message.startswith(_PCSCD_STRIP_PREFIX):
+        message = message[len(_PCSCD_STRIP_PREFIX):]
+    return (f"{lineno}: {message}" if lineno else message)[:38]
 
 
 def connect():
