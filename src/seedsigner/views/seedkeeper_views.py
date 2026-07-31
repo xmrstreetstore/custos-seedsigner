@@ -620,3 +620,178 @@ class UninstallAppletView(View):
             show_back_button=False,
         )
         return Destination(MainMenuView)
+
+
+def _short_label(label: str) -> str:
+    """
+    A label cut down to one line, for screens that have other things to say.
+
+    The card takes a label of up to 127 bytes and the keyboard will happily
+    supply one. On the confirmation screen the label sits above the line warning
+    that the passphrase is being written too - so an over-long label does not
+    merely look untidy, it pushes the one sentence that matters off the bottom,
+    where TextArea draws it under the button. Truncate here; the card still gets
+    the whole thing.
+    """
+    if len(label) <= _CHARS_PER_LINE:
+        return label
+    return label[:_CHARS_PER_LINE - 1] + "…"
+
+
+class ExportSeedToCardView(View):
+    """
+    Write a loaded seed onto a SeedKeeper card.
+
+    The other direction of SeedKeeperSelectView, and reached from Backup Seed
+    rather than from the Smartcard menu: the seed is the subject here, the card
+    is only where it goes.
+
+    Stored with 'Plaintext export allowed' deliberately - that is the one export
+    right this device can read back, and list_importable() filters on it. A seed
+    saved any other way would be a seed this signer could not load again.
+    """
+
+    SAVE_ANYWAY = ButtonOption("Save another copy")
+
+    def __init__(self, seed: Seed):
+        super().__init__()
+        self.seed = seed
+
+
+    def run(self):
+        from seedsigner.gui.screens import seed_screens
+        from seedsigner.gui.screens.seedkeeper_screens import SeedKeeperPinEntryScreen
+        from seedsigner.models.settings_definition import SettingsConstants
+
+        fingerprint = self.seed.get_fingerprint(
+            network=self.settings.get_value(SettingsConstants.SETTING__NETWORK))
+
+        # Prefilled with the fingerprint because that is what identifies a seed
+        # unambiguously; a card holding three seeds called "wallet" helps nobody.
+        # Editable because the card's own list is the only place this is ever
+        # read, and a person choosing from it may want their own word for it.
+        ret = self.run_screen(
+            seed_screens.SeedAddPassphraseScreen,
+            title=_("Card label"),
+            passphrase=fingerprint,
+        )
+        if "is_back_button" in ret:
+            return Destination(BackStackView)
+        label = (ret.get("passphrase") or "").strip() or fingerprint
+
+        connector = None
+        loading = LoadingScreenThread(text=_("Reading card..."))
+        try:
+            loading.start()
+            try:
+                connector = seedkeeper.connect()
+            finally:
+                loading.stop()
+
+            if not seedkeeper.is_initialized(connector):
+                return self._warn(
+                    _("Card not set up yet.\n\nUse Smartcard > Set up new card "
+                      "first.")
+                )
+
+            pin = self.run_screen(SeedKeeperPinEntryScreen)
+            if pin == RET_CODE__BACK_BUTTON:
+                return Destination(BackStackView)
+            if not pin:
+                return self._warn(_("No PIN entered."))
+
+            loading = LoadingScreenThread(text=_("Unlocking..."))
+            loading.start()
+            try:
+                seedkeeper.verify_pin(connector, pin)
+                secret_dic, fingerprint_expected, described = \
+                    seedkeeper.build_seed_secret(
+                        connector,
+                        mnemonic=self.seed.mnemonic_str,
+                        passphrase=self.seed.passphrase,
+                        label=label,
+                        seed_bytes=self.seed.seed_bytes,
+                    )
+                needed = seedkeeper.secret_bytes_needed(secret_dic)
+                free = seedkeeper.card_free_memory(connector)
+                duplicate = seedkeeper.find_by_fingerprint(
+                    connector, fingerprint_expected)
+            finally:
+                loading.stop()
+
+            # Ask before writing, not after failing: a full card refuses the
+            # secret partway through OP_PROCESS, which is a worse thing to
+            # explain than a number compared beforehand.
+            if needed > free:
+                return self._warn(
+                    _("Not enough room on the card.\n\nneeds {needed}, free "
+                      "{free} bytes").format(needed=needed, free=free)
+                )
+
+            if duplicate is not None:
+                ret = self.run_screen(
+                    WarningScreen,
+                    title=_("Save to card"),
+                    status_headline=_("Already saved"),
+                    text=_("This seed is on the card as '{label}'.").format(
+                        label=_short_label(duplicate)),
+                    show_back_button=True,
+                    button_data=[self.SAVE_ANYWAY],
+                )
+                if ret == RET_CODE__BACK_BUTTON:
+                    return Destination(BackStackView)
+
+            # The passphrase travels with the seed, because the card's format
+            # carries it and export_mnemonic() reads it back. Say so: keeping a
+            # passphrase apart from its seed is the whole point of having one,
+            # and this is the moment that separation ends.
+            warning = _("Stored so this device can read it back.")
+            if self.seed.passphrase:
+                warning = _("The passphrase is saved with it.")
+
+            ret = self.run_screen(
+                DireWarningScreen,
+                title=_("Save to card"),
+                status_headline=_("Plaintext"),
+                text=_("{label}\n{warning}").format(label=_short_label(label), warning=warning),
+                show_back_button=True,
+                button_data=[ButtonOption(_("Save it"))],
+            )
+            if ret == RET_CODE__BACK_BUTTON:
+                return Destination(BackStackView)
+
+            loading = LoadingScreenThread(text=_("Saving..."))
+            loading.start()
+            try:
+                sid, _fp = seedkeeper.import_secret(
+                    connector, secret_dic, fingerprint_expected)
+            finally:
+                loading.stop()
+
+        except seedkeeper.SeedKeeperError as exc:
+            return self._warn(str(exc))
+        except Exception as exc:                       # noqa: BLE001
+            # Broad on purpose: an escaped exception here is a blank screen on a
+            # device with nowhere else to report it.
+            logger.exception("SeedKeeper export failed")
+            return self._warn(f"{type(exc).__name__}:\n{exc}")
+        finally:
+            if connector is not None:
+                seedkeeper.disconnect(connector)
+
+        return _show_success(
+            self, _("Save to card"),
+            _("Saved as '{label}'\nsecret {sid}, {described}").format(
+                label=_short_label(label), sid=sid, described=described),
+        )
+
+
+    def _warn(self, text):
+        self.run_screen(
+            WarningScreen,
+            title=_("Save to card"),
+            status_headline=None,
+            text=text,
+            show_back_button=False,
+        )
+        return Destination(MainMenuView)

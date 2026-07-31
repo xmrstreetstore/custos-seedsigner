@@ -25,6 +25,19 @@ TYPE_ELECTRUM = 0x40
 #: Only plaintext export can be read without a second card to decrypt with.
 EXPORT_PLAINTEXT_ALLOWED = 0x01
 
+#: Masterseed subtype 0x01: masterseed *plus* the BIP39 entropy and passphrase
+#: that produced it. export_mnemonic() already reads this layout.
+SUBTYPE_MASTERSEED_BIP39 = 0x01
+
+#: The wordlist byte for english, which is the only one this build generates.
+#: export_mnemonic() refuses anything else rather than return the wrong words,
+#: so writing anything else here would produce a secret we could not read back.
+WORDLIST_ENGLISH = 0x00
+
+#: SeedKeeper v1 cards predate the Masterseed-with-BIP39 layout and store a
+#: mnemonic as plain text instead. card_protocol_minor() picks between them.
+PROTOCOL_MINOR_V1 = 1
+
 
 #: Where pcsc-lite puts its client socket, and the daemon that creates it.
 PCSCD_SOCKET = "/run/pcscd/pcscd.comm"
@@ -629,6 +642,180 @@ def export_mnemonic(connector, sid, stype, subtype):
         return mnemonic, passphrase
 
     raise SeedKeeperError(f"Unsupported secret type {hex(stype)}.")
+
+
+def card_protocol_minor(connector) -> int:
+    """
+    The card's protocol minor version, which decides how a seed is stored.
+
+    v1 cards have no Masterseed-with-BIP39 layout; writing one to them produces a
+    secret the card will hand back but nothing can interpret. Asking costs one
+    APDU and picking wrongly costs a seed that cannot be read back.
+    """
+    try:
+        return int(connector.card_get_status()[3]["protocol_minor_version"])
+    except Exception as exc:                           # noqa: BLE001
+        raise SeedKeeperError(f"Could not read the card version:\n{exc}") from exc
+
+
+def card_free_memory(connector) -> int:
+    """Bytes the card says it has left for new secrets."""
+    try:
+        status = connector.seedkeeper_get_status()[3]
+    except Exception as exc:                           # noqa: BLE001
+        raise SeedKeeperError(f"Could not read card memory:\n{exc}") from exc
+
+    free = status.get("free_memory")
+    if free is None:
+        raise SeedKeeperError("The card did not report its free memory.")
+    return int(free)
+
+
+def _length_prefixed(data: bytes) -> list:
+    """[len][data], the card's layout for every variable-length field."""
+    if len(data) > 255:
+        # Refusing rather than writing a truncated secret.
+        raise SeedKeeperError(
+            "A field is too long for the card's one-byte length prefix."
+        )
+    return [len(data)] + list(data)
+
+
+def build_seed_secret(connector, mnemonic: str, passphrase: str, label: str,
+                      seed_bytes: bytes = b""):
+    """
+    Lay a seed out the way this particular card stores one.
+
+    Returns (secret_dic, fingerprint, described) where `fingerprint` is what the
+    card should report back and `described` names the format, for the screen.
+
+    `seed_bytes` is the master seed as *this device* derived it. It is passed in
+    rather than recomputed so that what lands on the card is what the signer
+    actually uses - recomputing here would work until some normalisation detail
+    differed, and then the card would hold a subtly different seed.
+    """
+    import hashlib
+
+    label_bytes = label.encode("utf-8")
+    if len(label_bytes) > 127:
+        raise SeedKeeperError("That label is too long for the card.")
+
+    passphrase_bytes = passphrase.encode("utf-8")
+
+    if card_protocol_minor(connector) <= PROTOCOL_MINOR_V1:
+        stype, subtype, described = TYPE_BIP39, 0x00, "BIP39 mnemonic"
+        secret_list = (_length_prefixed(mnemonic.encode("utf-8"))
+                       + _length_prefixed(passphrase_bytes))
+    else:
+        stype, subtype, described = (TYPE_MASTERSEED, SUBTYPE_MASTERSEED_BIP39,
+                                     "Masterseed + BIP39")
+        try:
+            from embit import bip39
+            entropy = bip39.mnemonic_to_bytes(mnemonic)
+        except Exception as exc:                       # noqa: BLE001
+            raise SeedKeeperError(
+                f"Could not derive the BIP39 entropy:\n{exc}"
+            ) from exc
+
+        if not seed_bytes:
+            raise SeedKeeperError("No master seed to store.")
+
+        # Exactly the layout export_mnemonic() parses back out.
+        secret_list = (_length_prefixed(bytes(seed_bytes))
+                       + [WORDLIST_ENGLISH]
+                       + _length_prefixed(bytes(entropy))
+                       + _length_prefixed(passphrase_bytes))
+
+    try:
+        header = connector.make_header(
+            stype, EXPORT_PLAINTEXT_ALLOWED, label, subtype=subtype)
+    except Exception as exc:                           # noqa: BLE001
+        raise SeedKeeperError(f"Could not build the secret header:\n{exc}") from exc
+
+    fingerprint = hashlib.sha256(bytes(secret_list)).hexdigest()[0:8]
+    return {"header": header, "secret_list": secret_list}, fingerprint, described
+
+
+def secret_bytes_needed(secret_dic) -> int:
+    """
+    How much room the card needs for this secret, header included.
+
+    Mirrors seedkeeper_import_secret's own padding: it pads to the next 16-byte
+    boundary and, when the length already lands on one, adds a whole further
+    block rather than nothing.
+    """
+    header_len = len(bytes.fromhex(secret_dic["header"]))
+    secret_len = len(secret_dic["secret_list"])
+    return header_len + secret_len + (16 - secret_len % 16)
+
+
+def find_by_fingerprint(connector, fingerprint: str):
+    """
+    The label of a secret already on the card with this fingerprint, or None.
+
+    The card derives the fingerprint from the secret itself, so a match means
+    the same seed is already stored. Saving it twice is not harmful, but it is
+    never what someone means to do, and card memory is small.
+    """
+    try:
+        headers = connector.seedkeeper_list_secret_headers()
+    except Exception:                                  # noqa: BLE001
+        # Not being able to check is not a reason to refuse the write; it only
+        # means we cannot offer the warning.
+        logger.info("could not list headers to check for duplicates")
+        return None
+
+    for header in headers:
+        if (header.get("fingerprint") or "").lower() == fingerprint.lower():
+            return (header.get("label") or "").strip() or f"secret {header.get('id')}"
+    return None
+
+
+def import_secret(connector, secret_dic, expected_fingerprint: str):
+    """
+    Write a prepared secret to the card and prove it arrived intact.
+
+    pysatochip checks the fingerprint the card reports against the one it
+    computed - and on a mismatch it calls logger.error() and returns the id
+    anyway. So a garbled write returns success, and on this device that would be
+    a green tick over a seed the card cannot reproduce. Compare it here, where
+    disagreeing can still stop the flow.
+
+    Then confirm from the card rather than from the absence of an exception:
+    re-read the headers and require the new id to be there. That is the standing
+    rule for every card operation in this file, and it matters most here, where
+    the thing being asserted is "your seed is safely on this card".
+    """
+    try:
+        sid, fingerprint = connector.seedkeeper_import_secret(secret_dic)
+    except Exception as exc:                           # noqa: BLE001
+        raise SeedKeeperError(f"The card refused the secret:\n{exc}") from exc
+
+    if fingerprint and fingerprint.lower() != expected_fingerprint.lower():
+        # Kept to five lines: this is a plain WarningScreen, which has 102px,
+        # and the sentence that must survive is the last one.
+        raise SeedKeeperError(
+            "Card stored the wrong data.\n"
+            f"{expected_fingerprint} != {fingerprint}\n"
+            "Do not rely on this copy."
+        )
+
+    try:
+        headers = connector.seedkeeper_list_secret_headers()
+        stored = any(header.get("id") == sid for header in headers)
+    except Exception:                                  # noqa: BLE001
+        raise SeedKeeperError(
+            f"Saved as secret {sid}, but the card could not be re-read to "
+            "confirm it."
+        ) from None
+
+    if not stored:
+        raise SeedKeeperError(
+            f"Card claims secret {sid} saved, but does not list it.\n"
+            "Do not rely on this copy."
+        )
+
+    return sid, fingerprint
 
 
 def _safe_disconnect(connector) -> None:

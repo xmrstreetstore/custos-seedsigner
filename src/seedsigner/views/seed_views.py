@@ -634,17 +634,23 @@ class SeedOptionsView(View):
 class SeedBackupView(View):
     VIEW_WORDS = ButtonOption("View seed words")
     EXPORT_SEEDQR = ButtonOption("Export as SeedQR")
+    SAVE_TO_SEEDKEEPER = ButtonOption("Save to SeedKeeper", SeedSignerIconConstants.MICROSD)
 
     def __init__(self, seed: Seed):
         super().__init__()
         self.seed = seed
-    
+
 
     def run(self):
         button_data = [self.VIEW_WORDS]
 
         if self.seed.seedqr_supported:
             button_data.append(self.EXPORT_SEEDQR)
+
+        # The other two backups put the seed on paper; this one puts it on a
+        # card. Offered for any mnemonic - unlike SeedQR there is no length or
+        # wordlist restriction, because the card stores the words themselves.
+        button_data.append(self.SAVE_TO_SEEDKEEPER)
 
         selected_menu_num = self.run_screen(
             ButtonListScreen,
@@ -661,6 +667,10 @@ class SeedBackupView(View):
 
         elif button_data[selected_menu_num] == self.EXPORT_SEEDQR:
             return Destination(SeedTranscribeSeedQRFormatView, view_args={"seed": self.seed})
+
+        elif button_data[selected_menu_num] == self.SAVE_TO_SEEDKEEPER:
+            from .seedkeeper_views import ExportSeedToCardView
+            return Destination(ExportSeedToCardView, view_args={"seed": self.seed})
 
 
 
