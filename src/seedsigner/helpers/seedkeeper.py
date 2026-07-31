@@ -27,6 +27,7 @@ EXPORT_PLAINTEXT_ALLOWED = 0x01
 
 #: Where pcsc-lite puts its client socket, and the daemon that creates it.
 PCSCD_SOCKET = "/run/pcscd/pcscd.comm"
+PCSCD_PID = "/run/pcscd/pcscd.pid"
 PCSCD_BIN = "/usr/sbin/pcscd"
 TTY_READER = "/dev/ttyAMA0"
 
@@ -97,19 +98,22 @@ def _start_pcscd(timeout: float = 12.0) -> str:
     import subprocess
     import time
 
+    # Every caller renders this as "pcscd: <state>", so none of these say the
+    # word again - on a 240px-wide screen "pcscd: pcscd exited 1" spent a line
+    # and a half repeating itself.
     if os.path.exists(PCSCD_SOCKET):
         return "already up"
     if not os.path.exists(PCSCD_BIN):
-        return "pcscd not installed"
+        return "not installed"
 
     try:
         proc = subprocess.run(
             [PCSCD_BIN], capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return "pcscd did not return"
+        return "did not return"
     except Exception as exc:                       # noqa: BLE001 - surfaced to screen
-        return f"could not run pcscd: {exc}"
+        return f"could not run: {exc}"
 
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -117,11 +121,153 @@ def _start_pcscd(timeout: float = 12.0) -> str:
             return "started"
         time.sleep(0.25)
 
-    # It ran but never created the socket. Whatever it printed is the reason.
+    # It ran but never created the socket. Whatever it printed is the reason -
+    # except that in daemon mode it prints nothing at all, so ask again.
     said = " ".join((proc.stdout or "").split() + (proc.stderr or "").split())
     if said:
-        return f"pcscd exited {proc.returncode}: {said[:120]}"
-    return f"pcscd exited {proc.returncode}, no socket"
+        return f"exit {proc.returncode}: {said[:120]}"
+
+    why = _why_pcscd_failed()
+    if why:
+        return f"exit {proc.returncode}: {why}"
+    return f"exit {proc.returncode}, no socket"
+
+
+#: Log lines pcscd emits on its way up that name no fault. Reporting one of
+#: these as "the reason" would be worse than saying nothing.
+_PCSCD_NOISE = (
+    "daemon ready",
+    "Using drivers directory",
+    "pcsc-lite ",
+    "debug level=",
+    "Received signal",
+    "cleaning ",
+    "Parsing conf",
+)
+
+#: What a line has to say to be the reason pcscd stopped. Matched case-folded:
+#: pcscd's --debug output carries no severity labels at all, only
+#: "file.c:line:func() message", and its own wording is inconsistent -
+#: "Error initializing pcscd." next to "SEC1210 init failed." So match on the
+#: words, not on a level, and never on capitalisation.
+_PCSCD_FAULT = ("error", "failed", "cannot", "invalid", "no such", "critical")
+
+
+def _why_pcscd_failed(timeout: float = 8.0) -> str:
+    """
+    Get pcscd to say *why* it will not start, in words we can put on screen.
+
+    Started normally, pcscd forks and calls DebugLogSetLogType(SYSLOG) before
+    anything can go wrong, so every reason it might give goes to syslog - and
+    this image runs no syslog daemon, so the reason is discarded. Worse, the
+    daemon's own exit code is only ever the byte its child wrote to the startup
+    pipe: 1 for "at_exit() was reached", which covers reader-config parsing,
+    socket creation and context setup alike. "exited 1" therefore names four
+    different faults and distinguishes none of them.
+
+    --foreground switches logging to stdout, which we can capture. Nothing is
+    left behind: if it comes up it is killed again, and the caller retries the
+    normal path.
+    """
+    import subprocess
+
+    survived = False
+    try:
+        proc = subprocess.run(
+            [PCSCD_BIN, "--foreground", "--debug"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired as exc:
+        # Still alive at the deadline, so in the foreground it works.
+        survived = True
+        out = _as_text(exc.stdout) + _as_text(exc.stderr)
+    except Exception as exc:                       # noqa: BLE001 - surfaced to screen
+        logger.info("could not run pcscd --foreground: %s", exc)
+        return ""
+    finally:
+        # A foreground pcscd that got far enough creates the client socket, and
+        # the timeout above kills it outright, so at_exit() never runs to remove
+        # it. Left behind, that socket makes the next _start_pcscd() report
+        # "already up" and hand the caller a dead daemon - a worse fault than
+        # the one being diagnosed, and one that outlives the diagnosis.
+        _clear_stale_pcscd_files()
+
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+    if survived:
+        if any("daemon ready" in ln for ln in lines):
+            return "runs in foreground but not as a daemon"
+        return "pcscd hung starting up"
+
+    # Its last complaint is the one that stopped it.
+    for line in reversed(lines):
+        if any(noise in line for noise in _PCSCD_NOISE):
+            continue
+        low = line.lower()
+        if any(word in low for word in _PCSCD_FAULT):
+            return _trim_pcscd_line(line)
+    return ""
+
+
+def _clear_stale_pcscd_files() -> None:
+    """
+    Remove a socket/pid file left by a pcscd that is no longer running.
+
+    Only if it really is gone. S01pcscd may have started a daemon at boot that
+    was still initialising when we looked - opening the SEC1210 over a 9600-baud
+    link is not instant - and deleting a live daemon's socket would break a
+    working reader in the name of tidying up. pcscd settles the same question
+    the same way: read the pid, signal 0, believe the answer.
+    """
+    import os
+
+    try:
+        with open(PCSCD_PID) as fh:
+            pid = int(fh.read().strip("\x00 \n\r\t") or 0)
+    except (OSError, ValueError):
+        pid = 0
+
+    if pid > 0:
+        try:
+            os.kill(pid, 0)
+            return                                 # alive - leave it alone
+        except OSError:
+            pass                                   # gone, or not ours to signal
+
+    for path in (PCSCD_SOCKET, PCSCD_PID):
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+        except OSError as exc:
+            logger.info("could not remove %s: %s", path, exc)
+
+
+def _as_text(raw) -> str:
+    """TimeoutExpired hands back bytes or str depending on how it was reached."""
+    if raw is None:
+        return ""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", "replace")
+    return raw
+
+
+def _trim_pcscd_line(line: str) -> str:
+    """
+    Drop pcscd's timestamp/file/line preamble, keep the sentence.
+
+    --debug lines look like
+        00000000 pcscdaemon.c:733:main() Error initializing pcscd.
+    and the screen this lands on is 240px wide, so the preamble would push the
+    only useful words off the edge.
+
+    Capped short on purpose: this line shares a WarningScreen with the exception
+    name and _facts(), and TextArea renders straight past the bottom edge rather
+    than complaining where anyone can see it.
+    """
+    if "()" in line:
+        line = line.split("()", 1)[1].lstrip(": ")
+    return line[:44]
 
 
 def connect():
@@ -432,15 +578,23 @@ GP_DEFAULT_KEY = "404142434445464748494A4B4C4D4E4F"
 #: a wrong answer on screen into a pause.
 GP_OPEN_ATTEMPTS = 2
 
-def _gp_session(pygp):
+def _gp_session(pygp, pcscd_state: str = ""):
     """One attempt at terminal + card + auth. Raises SeedKeeperError."""
     try:
         pygp.terminal()
         pygp.card()
     except _LIB_FAILURE as exc:
+        # pygp says only "Service not available" here - SCARD_E_NO_SERVICE
+        # spelled out, i.e. the symptom we already know - and nothing about why.
+        # connect() has always carried pcscd's own account onto its screen; this
+        # path dropped it, which is why the card manager failure was the less
+        # informative of the two. When there is a reason, print that instead of
+        # pygp's prose rather than as well as it: the lines are not free.
+        detail = f"{str(exc)[:120]}\n" if not pcscd_state else ""
         raise SeedKeeperError(
-            f"Could not reach the card manager:\n{type(exc).__name__}: "
-            f"{str(exc)[:120]}\n\n{_facts()}"
+            f"Could not reach the card manager:\n{type(exc).__name__}\n{detail}\n"
+            + (f"pcscd: {pcscd_state}\n" if pcscd_state else "")
+            + _facts()
         ) from exc
 
     try:
@@ -476,7 +630,7 @@ def gp_open():
     except ImportError as exc:
         raise SeedKeeperError(f"pygp missing: {exc}") from exc
 
-    _start_pcscd()
+    pcscd_state = _start_pcscd()
 
     import time
 
@@ -488,7 +642,7 @@ def gp_open():
             # unpowered is what produces SCARD_E_NOT_TRANSACTED.
             time.sleep(CARD_READY_POLL)
         try:
-            _gp_session(pygp)
+            _gp_session(pygp, pcscd_state)
         except SeedKeeperError as exc:
             last_error = exc
             gp_close(pygp)
