@@ -10,6 +10,7 @@ Nothing here draws to the screen. Views own the UI; this owns the card.
 """
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -127,10 +128,24 @@ def _start_pcscd(timeout: float = 12.0) -> str:
     if said:
         return f"exit {proc.returncode}: {said[:120]}"
 
+    # The reason displaces the exit code rather than joining it: once the fault
+    # has a source line and a sentence, "exit 1" only says at_exit() was
+    # reached, which is implied. The screen has five lines and no more.
     why = _why_pcscd_failed()
     if why:
-        return f"exit {proc.returncode}: {why}"
+        return why
     return f"exit {proc.returncode}, no socket"
+
+
+#: States that carry no diagnosis. Anything else is pcscd's own account of the
+#: fault, and is worth a line the exception name would otherwise have taken.
+_PCSCD_TERSE = ("already up", "started", "not installed", "did not return")
+
+
+def _pcscd_diagnosed(state: str) -> bool:
+    """Whether `state` names a cause, rather than just reporting a failure."""
+    return bool(state) and state not in _PCSCD_TERSE \
+        and not state.startswith(("exit ", "could not run"))
 
 
 #: Log lines pcscd emits on its way up that name no fault. Reporting one of
@@ -141,9 +156,17 @@ _PCSCD_NOISE = (
     "pcsc-lite ",
     "debug level=",
     "Received signal",
-    "cleaning ",
     "Parsing conf",
+    # clean_temp_files() runs *after* the fault and complains about wreckage:
+    # "Cannot remove /run/pcscd/pcscd.comm: No such file or directory" only
+    # means the socket was never created, which is the thing we already know.
+    # Shipped once as the reported reason - it named the epitaph, not the cause.
+    "Cannot remove",
 )
+
+#: at_exit() logs this immediately before clean_temp_files(). Everything from
+#: here on is shutdown, so the cause is the last fault line *above* it.
+_PCSCD_EXIT_MARKER = "cleaning "
 
 #: What a line has to say to be the reason pcscd stopped. Matched case-folded:
 #: pcscd's --debug output carries no severity labels at all, only
@@ -198,14 +221,21 @@ def _why_pcscd_failed(timeout: float = 8.0) -> str:
     if survived:
         if any("daemon ready" in ln for ln in lines):
             return "runs in foreground but not as a daemon"
-        return "pcscd hung starting up"
+        return "hung starting up"
 
-    # Its last complaint is the one that stopped it.
+    # Everything at_exit() prints describes the shutdown, not what caused it.
+    # Cut there first, or the last "fault" line found is always the cleanup
+    # failing to remove a socket that was never created.
+    for i, line in enumerate(lines):
+        if _PCSCD_EXIT_MARKER in line:
+            lines = lines[:i]
+            break
+
+    # Of what remains, its last complaint is the one that stopped it.
     for line in reversed(lines):
         if any(noise in line for noise in _PCSCD_NOISE):
             continue
-        low = line.lower()
-        if any(word in low for word in _PCSCD_FAULT):
+        if any(word in line.lower() for word in _PCSCD_FAULT):
             return _trim_pcscd_line(line)
     return ""
 
@@ -252,22 +282,31 @@ def _as_text(raw) -> str:
     return raw
 
 
+#: "00000000 pcscdaemon.c:733:main() Error initializing pcscd."
+#:                        ^^^ kept   ^^^^^^^^^^^^^^^^^^^^^^^^^ kept
+_PCSCD_LINE_RE = re.compile(r"[\w./-]+\.[ch]:(\d+):\w+\(\)\s*(.*)$")
+
+
 def _trim_pcscd_line(line: str) -> str:
     """
-    Drop pcscd's timestamp/file/line preamble, keep the sentence.
+    Reduce a --debug line to its source line number and its sentence.
 
-    --debug lines look like
-        00000000 pcscdaemon.c:733:main() Error initializing pcscd.
-    and the screen this lands on is 240px wide, so the preamble would push the
-    only useful words off the edge.
+    The number is not decoration. pcscdaemon.c logs the byte-identical string
+    "Error initializing pcscd." at both line 732 (InitializeSocket failed) and
+    line 743 (ContextsInitialize failed), so the message alone cannot say which
+    of the two happened - and those are different faults with different fixes.
+    Four characters buys that distinction.
 
-    Capped short on purpose: this line shares a WarningScreen with the exception
-    name and _facts(), and TextArea renders straight past the bottom edge rather
-    than complaining where anyone can see it.
+    The rest of the preamble goes: a timestamp and a filename would push the
+    only useful words off a 240px-wide screen. Capped short for the same reason
+    - measured budget is 102px, five lines, shared with _facts().
     """
+    match = _PCSCD_LINE_RE.search(line)
+    if match:
+        return f"{match.group(1)}: {match.group(2)}"[:38]
     if "()" in line:
         line = line.split("()", 1)[1].lstrip(": ")
-    return line[:44]
+    return line[:38]
 
 
 def connect():
@@ -300,6 +339,13 @@ def connect():
     except SeedKeeperError:
         raise
     except Exception as exc:                       # noqa: BLE001 - surfaced to screen
+        # When pcscd has named the fault, the exception name is always
+        # EstablishContextException - "there is no daemon", which the reason
+        # already explains - and it costs one of the five lines available.
+        if _pcscd_diagnosed(pcscd_state):
+            raise SeedKeeperError(
+                f"Reader check failed.\npcscd: {pcscd_state}\n{_facts()}"
+            ) from exc
         raise SeedKeeperError(
             f"Reader check failed:\n{type(exc).__name__}\n\n"
             f"pcscd: {pcscd_state}\n{_facts()}"
@@ -590,9 +636,15 @@ def _gp_session(pygp, pcscd_state: str = ""):
         # path dropped it, which is why the card manager failure was the less
         # informative of the two. When there is a reason, print that instead of
         # pygp's prose rather than as well as it: the lines are not free.
-        detail = f"{str(exc)[:120]}\n" if not pcscd_state else ""
+        # "Could not reach the card manager" alone wraps to two lines on the
+        # narrow panel, and at five lines total there is nothing to spare.
+        if _pcscd_diagnosed(pcscd_state):
+            raise SeedKeeperError(
+                f"Card manager unreachable.\npcscd: {pcscd_state}\n" + _facts()
+            ) from exc
         raise SeedKeeperError(
-            f"Could not reach the card manager:\n{type(exc).__name__}\n{detail}\n"
+            f"Card manager unreachable:\n{type(exc).__name__}: "
+            f"{str(exc)[:60]}\n"
             + (f"pcscd: {pcscd_state}\n" if pcscd_state else "")
             + _facts()
         ) from exc
