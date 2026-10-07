@@ -661,7 +661,10 @@ class SeedAddPassphraseScreen(BaseTopNavScreen):
 
 
     def __post_init__(self):
-        self.title = _("BIP-39 Passphrase")
+        # Keep a caller's title: this keyboard is also how the card label is typed,
+        # and a label prompt headed "BIP-39 Passphrase" invites the real one.
+        if self.title == BaseTopNavScreen.title:
+            self.title = _("BIP-39 Passphrase")
         super().__post_init__()
 
         keys_lower = "abcdefghijklmnopqrstuvwxyz"

@@ -314,6 +314,11 @@ class SeedKeeperSelectView(View):
             )
 
         self.controller.storage.set_pending_seed(seed)
+        if seed.passphrase:
+            # Never apply a stored passphrase silently: SeedFinalizeView shows the
+            # bare seed's fingerprint, so "Done" there would load a different
+            # wallet from the one on screen.
+            return Destination(SeedKeeperPassphraseChoiceView)
         from seedsigner.views.seed_views import SeedFinalizeView
         return Destination(SeedFinalizeView)
 
@@ -326,6 +331,55 @@ class SeedKeeperSelectView(View):
             show_back_button=False,
         )
         return Destination(MainMenuView)
+
+
+def _ask_passphrase_choice(view, title: str, headline: str, text: str,
+                           button_data: list) -> int:
+    """A neutral question about the passphrase: not a warning, not a success."""
+    from seedsigner.gui.components import GUIConstants
+    from seedsigner.gui.screens.screen import LargeIconStatusScreen
+
+    return view.run_screen(
+        LargeIconStatusScreen,
+        title=title,
+        status_icon_name=SeedSignerIconConstants.PASSPHRASE,
+        status_color=GUIConstants.INFO_COLOR,
+        status_headline=headline,
+        text=text,
+        show_back_button=False,
+        button_data=button_data,
+    )
+
+
+class SeedKeeperPassphraseChoiceView(View):
+    """
+    The card returned a passphrase with the seed: ask whether to use it.
+
+    The pending seed already carries the card's passphrase. Using it goes to
+    stock's review screen, which shows the fingerprint with and without it so the
+    choice can be checked; leaving it off goes to stock's finalize screen, where a
+    different passphrase can still be typed by hand.
+    """
+
+    USE = ButtonOption("Use card passphrase")
+    WORDS_ONLY = ButtonOption("Words only")
+
+    def run(self):
+        from seedsigner.views.seed_views import SeedFinalizeView, SeedReviewPassphraseView
+
+        button_data = [self.USE, self.WORDS_ONLY]
+        selected = _ask_passphrase_choice(
+            self, _("SeedKeeper"), _("Passphrase found"),
+            _("The card also holds a passphrase for this seed."),
+            button_data,
+        )
+
+        seed = self.controller.storage.get_pending_seed()
+        if button_data[selected] == self.USE:
+            return Destination(SeedReviewPassphraseView)
+
+        seed.set_passphrase("")
+        return Destination(SeedFinalizeView)
 
 
 class InstallAppletView(View):
@@ -652,6 +706,8 @@ class ExportSeedToCardView(View):
     """
 
     SAVE_ANYWAY = ButtonOption("Save another copy")
+    WORDS_ONLY = ButtonOption("Words only")
+    WITH_PASSPHRASE = ButtonOption("Words + passphrase")
 
     def __init__(self, seed: Seed):
         super().__init__()
@@ -663,7 +719,24 @@ class ExportSeedToCardView(View):
         from seedsigner.gui.screens.seedkeeper_screens import SeedKeeperPinEntryScreen
         from seedsigner.models.settings_definition import SettingsConstants
 
-        fingerprint = self.seed.get_fingerprint(
+        # What goes on the card: the loaded seed, or the same words without the
+        # passphrase. A separate Seed, not set_passphrase("") on the loaded one -
+        # that would change the wallet this device is holding.
+        stored = self.seed
+        if self.seed.passphrase:
+            button_data = [self.WORDS_ONLY, self.WITH_PASSPHRASE]
+            selected = _ask_passphrase_choice(
+                self, _("Save to card"), _("Passphrase"),
+                _("Save the passphrase on the card too?"),
+                button_data,
+            )
+            if button_data[selected] == self.WORDS_ONLY:
+                stored = type(self.seed)(
+                    mnemonic=self.seed.mnemonic_list,
+                    wordlist_language_code=self.seed.wordlist_language_code,
+                )
+
+        fingerprint = stored.get_fingerprint(
             network=self.settings.get_value(SettingsConstants.SETTING__NETWORK))
 
         # Prefilled with the fingerprint because that is what identifies a seed
@@ -707,10 +780,10 @@ class ExportSeedToCardView(View):
                 secret_dic, fingerprint_expected, described = \
                     seedkeeper.build_seed_secret(
                         connector,
-                        mnemonic=self.seed.mnemonic_str,
-                        passphrase=self.seed.passphrase,
+                        mnemonic=stored.mnemonic_str,
+                        passphrase=stored.passphrase,
                         label=label,
-                        seed_bytes=self.seed.seed_bytes,
+                        seed_bytes=stored.seed_bytes,
                     )
                 needed = seedkeeper.secret_bytes_needed(secret_dic)
                 free = seedkeeper.card_free_memory(connector)
@@ -741,13 +814,13 @@ class ExportSeedToCardView(View):
                 if ret == RET_CODE__BACK_BUTTON:
                     return Destination(BackStackView)
 
-            # The passphrase travels with the seed, because the card's format
-            # carries it and export_mnemonic() reads it back. Say so: keeping a
-            # passphrase apart from its seed is the whole point of having one,
-            # and this is the moment that separation ends.
+            # Say which it is: keeping a passphrase apart from its seed is the
+            # whole point of having one, and saving both is where that ends.
             warning = _("Stored so this device can read it back.")
-            if self.seed.passphrase:
+            if stored.passphrase:
                 warning = _("The passphrase is saved with it.")
+            elif self.seed.passphrase:
+                warning = _("Words only, no passphrase.")
 
             ret = self.run_screen(
                 DireWarningScreen,

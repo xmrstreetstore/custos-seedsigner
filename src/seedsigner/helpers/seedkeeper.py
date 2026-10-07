@@ -45,6 +45,19 @@ PCSCD_PID = "/run/pcscd/pcscd.pid"
 PCSCD_BIN = "/usr/sbin/pcscd"
 TTY_READER = "/dev/ttyAMA0"
 
+#: The PN532 NFC reader, as pcscd names it (ifdnfc's FRIENDLYNAME) and as libnfc
+#: reaches it. Must match /etc/nfc/libnfc.conf in the OS overlay.
+NFC_READER_PREFIX = "IFD-NFC"
+NFC_CONNSTRING = "pn532_i2c:/dev/i2c-1"
+
+#: ifdnfc's control protocol (src/ifd-nfc.h): one SCardControl code, with a
+#: one-byte command and, for SET_ACTIVE, a little-endian u16 length and the
+#: NUL-terminated connstring. The reply's first byte is IS_ACTIVE or not.
+IFDNFC_CTRL_ACTIVE = 1
+IFDNFC_SET_INACTIVE = 0
+IFDNFC_SET_ACTIVE = 1
+IFDNFC_IS_ACTIVE = 1
+
 #: How long to let pysatochip's monitor thread finish connecting to the card
 #: before giving up. Measured at ~3s over the SEC1210's 9600-baud serial link,
 #: so this is generous on purpose: waiting a moment longer costs nothing next to
@@ -148,6 +161,89 @@ def _start_pcscd(timeout: float = 12.0) -> str:
     if why:
         return why
     return f"exit {proc.returncode}, no socket"
+
+
+#: The NFC reader's last activation, keyed by pcscd's pid: ifdnfc forgets it is
+#: active whenever pcscd restarts, and a PN532 that is not fitted would otherwise
+#: be probed again (with libnfc's I2C timeouts) on every card operation.
+_nfc = {"pid": None, "state": "-"}
+
+
+def _activate_nfc(force: bool = False) -> str:
+    """
+    Switch the PN532 reader on, once per pcscd lifetime, and say how it went.
+
+    ifdnfc registers its reader with pcscd inactive. 3rdIteration runs
+    `ifdnfc-activate yes` for this, but that tool picks its reader by string
+    comparison and takes the first name that does not sort before "IFD-NFC" -
+    which is "SEC1210 ..." whenever pcscd happens to list that one first. So this
+    sends ifdnfc's own control command, to the reader named IFD-NFC and no other.
+
+    `force` cycles it off and on again even if already active. pygp's close()
+    ends in a cold reset, and 3rdIteration re-activates the PN532 after every
+    applet install or removal for the same reason (restart_pn532).
+
+    Returns "on", "off" (no PN532 answered), "none" (no NFC reader configured)
+    or a short error. Never raises: NFC being unavailable must not take the
+    SEC1210 down with it.
+    """
+    try:
+        with open(PCSCD_PID) as f:
+            # pcscd writes the pid with a trailing NUL.
+            pid = f.read().strip("\0 \n") or None
+    except OSError:
+        pid = None
+    if not force and pid and _nfc["pid"] == pid:
+        return _nfc["state"]
+
+    try:
+        state = _ifdnfc_set_active()
+    except Exception as exc:                       # noqa: BLE001 - reported, not fatal
+        state = f"err {type(exc).__name__}"
+    _nfc.update(pid=pid, state=state)
+    logger.debug("NFC reader: %s", state)
+    return state
+
+
+def _ifdnfc_set_active() -> str:
+    import struct
+    from smartcard import scard
+
+    ok = scard.SCARD_S_SUCCESS
+    hres, ctx = scard.SCardEstablishContext(scard.SCARD_SCOPE_USER)
+    if hres != ok:
+        return f"ctx {hres & 0xFFFFFFFF:#x}"
+    try:
+        hres, names = scard.SCardListReaders(ctx, [])
+        name = next((n for n in (names or []) if n.startswith(NFC_READER_PREFIX)), None)
+        if hres != ok or name is None:
+            return "none"
+
+        hres, hcard, _proto = scard.SCardConnect(ctx, name, scard.SCARD_SHARE_DIRECT, 0)
+        if hres != ok:
+            return f"connect {hres & 0xFFFFFFFF:#x}"
+        try:
+            # ifdnfc-activate turns it off first too: a stale session would
+            # otherwise keep the old device handle.
+            scard.SCardControl(hcard, IFDNFC_CTRL_ACTIVE, [IFDNFC_SET_INACTIVE])
+            cs = NFC_CONNSTRING.encode() + b"\0"
+            hres, reply = scard.SCardControl(
+                hcard, IFDNFC_CTRL_ACTIVE,
+                list(bytes([IFDNFC_SET_ACTIVE]) + struct.pack("<H", len(cs)) + cs))
+            if hres != ok:
+                return f"ctl {hres & 0xFFFFFFFF:#x}"
+            return "on" if reply and reply[0] == IFDNFC_IS_ACTIVE else "off"
+        finally:
+            scard.SCardDisconnect(hcard, scard.SCARD_LEAVE_CARD)
+    finally:
+        scard.SCardReleaseContext(ctx)
+
+
+def _pygp_used_nfc() -> bool:
+    """Whether pygp's current session went through the PN532."""
+    import sys
+    name = getattr(sys.modules.get("pygp.pygp"), "readername", None) or ""
+    return str(name).startswith(NFC_READER_PREFIX)
 
 
 #: States that carry no diagnosis. Anything else is pcscd's own account of the
@@ -376,6 +472,7 @@ def connect():
     # is not running produces SCARD_E_NO_SERVICE, which reads like a reader
     # fault and sends you looking at the hardware.
     pcscd_state = _start_pcscd()
+    _activate_nfc()
 
     try:
         from smartcard.System import readers
@@ -445,7 +542,7 @@ def connect():
             # not a timing problem, so do not sit here retrying it.
             _safe_disconnect(connector)
             raise SeedKeeperError(
-                "No SeedKeeper applet on this card.\n\nInsert a SeedKeeper card, or "
+                "No SeedKeeper applet on this card.\n\nInsert or tap a SeedKeeper card, or "
                 "install the applet from Smartcard Tools."
             ) from exc
         except (KeyboardInterrupt, SystemExit):
@@ -456,7 +553,7 @@ def connect():
                 raise SeedKeeperError(
                     "The card never became ready.\n\n"
                     f"{type(exc).__name__}: {str(exc)[:100]}\n\n"
-                    f"after {attempts} attempts\n"
+                    f"after {attempts} attempts, nfc:{_nfc['state']}\n"
                     f"pcscd: {pcscd_state}\n{_facts()}"
                 ) from exc
             time.sleep(CARD_READY_POLL)
@@ -906,6 +1003,7 @@ def gp_open():
         raise SeedKeeperError(f"pygp missing: {exc}") from exc
 
     pcscd_state = _start_pcscd()
+    _activate_nfc()
 
     import time
 
@@ -1290,9 +1388,14 @@ def gp_close(pygp_module) -> None:
     be what made GET STATUS flaky here, with a fresh script sometimes finding an
     empty card until the reader settled.
     """
+    used_nfc = _pygp_used_nfc()
     try:
         pygp_module.close()
     except (KeyboardInterrupt, SystemExit):
         raise
     except _LIB_FAILURE:                          # best effort
         pass
+    if used_nfc:
+        # close() ends in a cold reset, after which ifdnfc does not see the card
+        # again until it is re-activated (3rdIteration's restart_pn532).
+        _activate_nfc(force=True)
