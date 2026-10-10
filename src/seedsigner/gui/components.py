@@ -183,6 +183,7 @@ class FontAwesomeIconConstants:
     DICE_SIX = "\uf526"
     KEYBOARD = "\uf11c"
     MAP = "\uf279"
+    MICROCHIP = "\uf2db"
     X = "\u0058"
 
 

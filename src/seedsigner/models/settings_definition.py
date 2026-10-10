@@ -368,6 +368,17 @@ class SettingsConstants:
         # (DISPLAY_CONFIGURATION__ILI9486__320x480, "ili9486 480x320"),  # TODO: Enable when ili9486 driver performance is improved
     ]
 
+    # Smartcard readers, as 3rdIteration names them, cut down to the two this
+    # device can carry. A reader that is switched off is left out of pcscd's
+    # reader list altogether (helpers/seedkeeper.py, _ignored_readers).
+    SETTING__SMARTCARD_INTERFACES = "smartcard_interfaces"
+    SMARTCARD_INTERFACE_SEC1210 = "sec1210"
+    SMARTCARD_INTERFACE_PN532 = "pn532"
+    ALL_SMARTCARD_INTERFACES = [
+        (SMARTCARD_INTERFACE_SEC1210, "SEC1210 card slot"),
+        (SMARTCARD_INTERFACE_PN532, "PN532 NFC"),
+    ]
+
 
     # Hidden settings
     SETTING__QR_BRIGHTNESS = "qr_background_color"
@@ -732,6 +743,15 @@ class SettingsDefinition:
                       type=SettingsConstants.TYPE__ENABLED_DISABLED,
                       visibility=SettingsConstants.VISIBILITY__HARDWARE,
                       default_value=SettingsConstants.OPTION__DISABLED),
+
+        SettingsEntry(category=SettingsConstants.CATEGORY__SYSTEM,
+                      attr_name=SettingsConstants.SETTING__SMARTCARD_INTERFACES,
+                      abbreviated_name="screaders",
+                      display_name=_mft("Smartcard interfaces"),
+                      type=SettingsConstants.TYPE__MULTISELECT,
+                      visibility=SettingsConstants.VISIBILITY__HARDWARE,
+                      selection_options=SettingsConstants.ALL_SMARTCARD_INTERFACES,
+                      default_value=[opt[0] for opt in SettingsConstants.ALL_SMARTCARD_INTERFACES]),
 
 
         # Developer options

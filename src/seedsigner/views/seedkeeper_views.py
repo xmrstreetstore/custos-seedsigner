@@ -14,7 +14,7 @@ import logging
 
 from gettext import gettext as _
 
-from seedsigner.gui.components import SeedSignerIconConstants
+from seedsigner.gui.components import FontAwesomeIconConstants, SeedSignerIconConstants
 from seedsigner.gui.screens import RET_CODE__BACK_BUTTON
 from seedsigner.gui.screens.screen import (
     ButtonListScreen, ButtonOption, DireWarningScreen, LoadingScreenThread,
@@ -94,7 +94,7 @@ def _wrap_capname(name: str) -> str:
 class SmartcardMenuView(View):
     """Top of the smartcard tree, reached from the Tools menu."""
 
-    LOAD_SEED = ButtonOption("Load seed from card", SeedSignerIconConstants.MICROSD)
+    LOAD_SEED = ButtonOption("Load seed from card", FontAwesomeIconConstants.MICROCHIP)
     INITIALIZE = ButtonOption("Set up new card")
     INSTALL = ButtonOption("Install applet")
     UNINSTALL = ButtonOption("Uninstall applet")

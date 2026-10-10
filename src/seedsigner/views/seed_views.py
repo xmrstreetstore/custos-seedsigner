@@ -164,11 +164,13 @@ class LoadSeedView(View):
     TYPE_12WORD = ButtonOption("Enter 12-word seed", FontAwesomeIconConstants.KEYBOARD)
     TYPE_24WORD = ButtonOption("Enter 24-word seed", FontAwesomeIconConstants.KEYBOARD)
     TYPE_ELECTRUM = ButtonOption("Enter Electrum seed", FontAwesomeIconConstants.KEYBOARD)
-    SEEDKEEPER = ButtonOption("From SeedKeeper", SeedSignerIconConstants.MICROSD)
+    SEEDKEEPER = ButtonOption("From SeedKeeper", FontAwesomeIconConstants.MICROCHIP)
     CREATE = ButtonOption("Create a seed", SeedSignerIconConstants.PLUS)
 
     def run(self):
+        # SeedKeeper first: loading a seed from a card is what this build is for.
         button_data = [
+            self.SEEDKEEPER,
             self.SEED_QR,
             self.TYPE_12WORD,
             self.TYPE_24WORD,
@@ -177,7 +179,6 @@ class LoadSeedView(View):
         if self.settings.get_value(SettingsConstants.SETTING__ELECTRUM_SEEDS) == SettingsConstants.OPTION__ENABLED:
             button_data.append(self.TYPE_ELECTRUM)
 
-        button_data.append(self.SEEDKEEPER)
         button_data.append(self.CREATE)
 
         selected_menu_num = self.run_screen(
@@ -634,7 +635,7 @@ class SeedOptionsView(View):
 class SeedBackupView(View):
     VIEW_WORDS = ButtonOption("View seed words")
     EXPORT_SEEDQR = ButtonOption("Export as SeedQR")
-    SAVE_TO_SEEDKEEPER = ButtonOption("Save to SeedKeeper", SeedSignerIconConstants.MICROSD)
+    SAVE_TO_SEEDKEEPER = ButtonOption("Save to SeedKeeper", FontAwesomeIconConstants.MICROCHIP)
 
     def __init__(self, seed: Seed):
         super().__init__()

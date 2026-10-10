@@ -45,6 +45,15 @@ PCSCD_PID = "/run/pcscd/pcscd.pid"
 PCSCD_BIN = "/usr/sbin/pcscd"
 TTY_READER = "/dev/ttyAMA0"
 
+#: The SEC1210 as pcscd names it (FRIENDLYNAME in /etc/reader.conf.d/sec1210).
+SEC1210_READER_PREFIX = "SEC1210"
+
+#: pcsc-lite's reader filter: readers whose name contains any of these
+#: ':'-separated fragments are never added. Read once, when pcscd starts.
+PCSCD_FILTER_ENV = "PCSCLITE_FILTER_IGNORE_READER_NAMES"
+#: What the running pcscd was started to ignore (see _running_ignore).
+PCSCD_IGNORE_RECORD = "/run/pcscd-ignore"
+
 #: The PN532 NFC reader, as pcscd names it (ifdnfc's FRIENDLYNAME) and as libnfc
 #: reaches it. Must match /etc/nfc/libnfc.conf in the OS overlay.
 NFC_READER_PREFIX = "IFD-NFC"
@@ -128,14 +137,26 @@ def _start_pcscd(timeout: float = 12.0) -> str:
     # Every caller renders this as "pcscd: <state>", so none of these say the
     # word again - on a 240px-wide screen "pcscd: pcscd exited 1" spent a line
     # and a half repeating itself.
+    ignore = _ignored_readers()
+    restarted = False
     if os.path.exists(PCSCD_SOCKET):
-        return "already up"
+        if _running_ignore() == ignore:
+            return "already up"
+        # The Smartcard interfaces setting changed since this daemon started.
+        # pcscd reads its reader filter once, at startup, so it has to go.
+        _stop_pcscd()
+        restarted = True
     if not os.path.exists(PCSCD_BIN):
         return "not installed"
 
+    env = dict(os.environ)
+    env.pop(PCSCD_FILTER_ENV, None)
+    if ignore:
+        env[PCSCD_FILTER_ENV] = ignore
+
     try:
         proc = subprocess.run(
-            [PCSCD_BIN], capture_output=True, text=True, timeout=timeout,
+            [PCSCD_BIN], capture_output=True, text=True, timeout=timeout, env=env,
         )
     except subprocess.TimeoutExpired:
         return "did not return"
@@ -145,6 +166,10 @@ def _start_pcscd(timeout: float = 12.0) -> str:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if os.path.exists(PCSCD_SOCKET):
+            _record_ignore(ignore)
+            if restarted:
+                _restart_card_monitor()
+                return "restarted"
             return "started"
         time.sleep(0.25)
 
@@ -157,10 +182,102 @@ def _start_pcscd(timeout: float = 12.0) -> str:
     # The reason displaces the exit code rather than joining it: once the fault
     # has a source line and a sentence, "exit 1" only says at_exit() was
     # reached, which is implied. The screen has five lines and no more.
-    why = _why_pcscd_failed()
+    why = _why_pcscd_failed(env=env)
     if why:
         return why
     return f"exit {proc.returncode}, no socket"
+
+
+def _ignored_readers() -> str:
+    """
+    The readers switched off under Settings > Hardware > Smartcard interfaces,
+    in the form pcscd takes them: name fragments separated by ':'.
+
+    pcsc-lite drops any reader whose name contains one of these before it is
+    ever opened (readerfactory.c, RFAddReader), so a switched-off SEC1210 never
+    touches the UART and a switched-off PN532 is never probed over I2C. This is
+    3rdIteration's mechanism too.
+    """
+    from seedsigner.models.settings_definition import SettingsConstants
+    try:
+        from seedsigner.models.settings import Settings
+        enabled = Settings.get_instance().get_value(
+            SettingsConstants.SETTING__SMARTCARD_INTERFACES)
+    except Exception as exc:                       # noqa: BLE001 - fall back to all on
+        # Failing closed here would hide both readers behind a settings fault,
+        # and nothing on screen would say why.
+        logger.info("could not read smartcard interfaces: %s", exc)
+        return ""
+    names = []
+    if SettingsConstants.SMARTCARD_INTERFACE_SEC1210 not in enabled:
+        names.append(SEC1210_READER_PREFIX)
+    if SettingsConstants.SMARTCARD_INTERFACE_PN532 not in enabled:
+        names.append(NFC_READER_PREFIX)
+    return ":".join(names)
+
+
+def _no_reader_hint() -> str:
+    """What to check when pcscd lists no reader, given which ones are switched on."""
+    ignored = set(filter(None, _ignored_readers().split(":")))
+    if ignored >= {SEC1210_READER_PREFIX, NFC_READER_PREFIX}:
+        return "Both readers are off in Hardware settings."
+    if SEC1210_READER_PREFIX in ignored:
+        return "Check the PN532 is wired to I2C."
+    return "Check the SEC1210 hat is seated."
+
+
+def _running_ignore() -> str:
+    """
+    What the running pcscd was started to ignore.
+
+    pcscd cannot be asked, so _start_pcscd writes it down. S01pcscd starts the
+    boot-time daemon without a filter and without writing anything, which is
+    why no record means "ignores nothing".
+    """
+    try:
+        with open(PCSCD_IGNORE_RECORD) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _record_ignore(ignore: str) -> None:
+    try:
+        with open(PCSCD_IGNORE_RECORD, "w") as fh:
+            fh.write(ignore)
+    except OSError as exc:
+        # Costs a needless restart next time, nothing worse.
+        logger.info("could not record pcscd filter: %s", exc)
+
+
+def _stop_pcscd(timeout: float = 5.0) -> None:
+    """Stop the running pcscd and wait until it is really gone."""
+    import os
+    import signal
+    import time
+
+    try:
+        with open(PCSCD_PID) as fh:
+            pid = int(fh.read().strip("\x00 \n\r\t") or 0)
+    except (OSError, ValueError):
+        pid = 0
+
+    if pid > 0:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                os.kill(pid, 0)                    # raises once it has exited
+                time.sleep(0.1)
+            os.kill(pid, signal.SIGKILL)
+            time.sleep(0.2)
+        except OSError:
+            pass                                   # gone
+
+    # A SIGTERM'd pcscd removes its own socket, a SIGKILL'd one cannot - and a
+    # socket left behind would read as "already up" to the start that follows.
+    _clear_stale_pcscd_files()
+    _nfc.update(pid=None, state="-")
 
 
 #: The NFC reader's last activation, keyed by pcscd's pid: ifdnfc forgets it is
@@ -248,7 +365,8 @@ def _pygp_used_nfc() -> bool:
 
 #: States that carry no diagnosis. Anything else is pcscd's own account of the
 #: fault, and is worth a line the exception name would otherwise have taken.
-_PCSCD_TERSE = ("already up", "started", "not installed", "did not return")
+_PCSCD_TERSE = ("already up", "started", "restarted", "not installed",
+                "did not return")
 
 
 def _pcscd_diagnosed(state: str) -> bool:
@@ -303,7 +421,7 @@ _PCSCD_FAULT = ("error", "failed", "cannot", "invalid", "no such", "critical",
                 "unable")
 
 
-def _why_pcscd_failed(timeout: float = 8.0) -> str:
+def _why_pcscd_failed(timeout: float = 8.0, env=None) -> str:
     """
     Get pcscd to say *why* it will not start, in words we can put on screen.
 
@@ -325,7 +443,7 @@ def _why_pcscd_failed(timeout: float = 8.0) -> str:
     try:
         proc = subprocess.run(
             [PCSCD_BIN, "--foreground", "--debug"],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, timeout=timeout, env=env,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired as exc:
@@ -480,7 +598,7 @@ def connect():
             raise SeedKeeperError(
                 "No card reader found.\n\n"
                 f"pcscd: {pcscd_state}\n{_facts()}\n\n"
-                "Check the SEC1210 hat is seated."
+                + _no_reader_hint()
             )
     except SeedKeeperError:
         raise
@@ -920,6 +1038,56 @@ def _safe_disconnect(connector) -> None:
         connector.card_disconnect()
     except Exception:                              # noqa: BLE001 - best effort
         pass
+    _drop_card_observer(connector)
+
+
+def _drop_card_observer(connector) -> None:
+    """
+    Unregister the connector's card observer from pyscard's CardMonitor.
+
+    pysatochip registers one per CardConnector and never removes it, and the
+    monitor is a process-wide singleton. Left alone, every finished connection
+    keeps an observer that, on each card insert or NFC tap, reconnects the card
+    and opens a secure channel of its own - re-keying the card underneath the
+    connection actually in use. After a few operations one tap set off a burst
+    of stale sessions.
+
+    pyscard's CardMonitor.deleteObserver only stops the monitor thread when
+    started on demand, which 2.3.1 is not, so this never blocks on a join.
+    """
+    monitor = getattr(connector, "cardmonitor", None)
+    observer = getattr(connector, "cardobserver", None)
+    if monitor is None or observer is None:
+        return
+    try:
+        monitor.deleteObserver(observer)
+    except Exception:                              # noqa: BLE001 - already gone
+        pass
+
+
+def _restart_card_monitor() -> None:
+    """
+    Give pyscard's CardMonitor a fresh thread after pcscd was restarted.
+
+    The monitor thread quits for good when pcscd goes away (it treats
+    SCARD_E_NO_SERVICE as interpreter shutdown), and nothing in pyscard starts
+    it again - so after a restart, insertions and NFC taps would simply never be
+    seen. Call only once the new pcscd is up: the thread opens its context as it
+    starts, and dies at once if there is nothing to open it against.
+    """
+    try:
+        from smartcard.CardMonitoring import CardMonitor, CardMonitoringThread
+    except ImportError:
+        return
+    monitor = CardMonitor.instance
+    if monitor is None:
+        return                                     # never started; nothing stale
+    old = CardMonitoringThread.instance
+    if old is not None:
+        old.stop()
+    with CardMonitoringThread.lock:
+        CardMonitoringThread.instance = None
+    monitor.rmthread = CardMonitoringThread(monitor)
 
 
 def disconnect(connector) -> None:

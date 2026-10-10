@@ -24,7 +24,7 @@ class ToolsMenuView(View):
     KEYBOARD = ButtonOption("Calc 12th/24th word", FontAwesomeIconConstants.KEYBOARD)
     ADDRESS_EXPLORER = ButtonOption("Address explorer")
     VERIFY_ADDRESS = ButtonOption("Verify address")
-    SMARTCARD = ButtonOption("Smartcard", SeedSignerIconConstants.MICROSD)
+    SMARTCARD = ButtonOption("Smartcard", FontAwesomeIconConstants.MICROCHIP)
 
     def run(self):
         button_data = [self.IMAGE, self.DICE, self.KEYBOARD, self.ADDRESS_EXPLORER, self.VERIFY_ADDRESS, self.SMARTCARD]
