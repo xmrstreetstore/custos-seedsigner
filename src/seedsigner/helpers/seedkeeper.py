@@ -572,6 +572,175 @@ def _trim_pcscd_line(line: str) -> str:
     return (f"{lineno}: {message}" if lineno else message)[:38]
 
 
+# --------------------------------------------------------------------------- #
+# Waiting for a card
+# --------------------------------------------------------------------------- #
+
+#: Where a card turned up.
+CARD_IN_SLOT = "slot"
+CARD_ON_NFC = "nfc"
+
+#: SELECT with no AID: picks the card's default applet (the card manager on a
+#: JCOP card). It changes nothing - every card operation selects what it needs
+#: afterwards - and any card answers it, applet installed or not, so a reply
+#: measures the link and nothing else.
+PROBE_APDU = [0x00, 0xA4, 0x04, 0x00, 0x00]
+
+
+def prepare_readers() -> str:
+    """Bring pcscd and the NFC reader up, as connect() would. Returns pcscd's state."""
+    state = _start_pcscd()
+    _activate_nfc()
+    return state
+
+
+def enabled_readers() -> tuple:
+    """(slot, nfc): which readers Settings > Hardware > Smartcard interfaces has on."""
+    ignored = set(filter(None, _ignored_readers().split(":")))
+    return SEC1210_READER_PREFIX not in ignored, NFC_READER_PREFIX not in ignored
+
+
+class CardWatch:
+    """
+    Watches the readers for a card, and measures the NFC link while one is held.
+
+    There is no signal strength to read: the PN532 does not report one, and
+    pcscd would only pass on present/absent if it did. What can be measured
+    honestly is whether the card keeps answering, so `probe()` sends a harmless
+    APDU and `quality` is the share of recent probes that got a reply. A card
+    held flat and still scores 100; one at the edge of the field drops replies,
+    and the number says so.
+
+    Never raises. If PC/SC cannot be reached, `usable` is False and the caller
+    should go straight on to connect(), whose errors say what is wrong.
+    """
+
+    WINDOW = 8              # probes the quality figure is taken over
+    GOOD = 75               # percent at which the link is good enough to use
+
+    def __init__(self):
+        self.ctx = None
+        self.readers = []
+        self.handle = None
+        self.protocol = None
+        self.results = []
+        try:
+            from smartcard import scard
+            self.sc = scard
+            hres, ctx = scard.SCardEstablishContext(scard.SCARD_SCOPE_USER)
+            if hres != scard.SCARD_S_SUCCESS:
+                return
+            self.ctx = ctx
+            hres, names = scard.SCardListReaders(ctx, [])
+            if hres == scard.SCARD_S_SUCCESS:
+                self.readers = list(names or [])
+        except Exception as exc:                   # noqa: BLE001 - see docstring
+            logger.info("card watch unavailable: %s", exc)
+
+    @property
+    def usable(self) -> bool:
+        return self.ctx is not None and bool(self.readers)
+
+    @staticmethod
+    def kind(reader: str):
+        if reader.startswith(NFC_READER_PREFIX):
+            return CARD_ON_NFC
+        if reader.startswith(SEC1210_READER_PREFIX):
+            return CARD_IN_SLOT
+        return None
+
+    def present(self):
+        """
+        Which reader holds a card right now: CARD_IN_SLOT, CARD_ON_NFC or None.
+
+        An inserted card wins over a tapped one, since the card operations take
+        the first reader with a card and the slot is the deliberate choice. A
+        card the reader marks MUTE (there, but not answering) counts as on the
+        NFC reader, so the quality bar can show it failing.
+        """
+        if not self.usable:
+            return None
+        sc = self.sc
+        try:
+            hres, states = sc.SCardGetStatusChange(
+                self.ctx, 0, [(r, sc.SCARD_STATE_UNAWARE) for r in self.readers])
+        except Exception:                          # noqa: BLE001
+            return None
+        if hres != sc.SCARD_S_SUCCESS:
+            return None
+        found = set()
+        for reader, event, _atr in states:
+            if not event & sc.SCARD_STATE_PRESENT:
+                continue
+            kind = self.kind(reader)
+            if kind == CARD_IN_SLOT and event & sc.SCARD_STATE_MUTE:
+                continue                           # half-inserted; wait for it
+            if kind:
+                found.add(kind)
+        if CARD_IN_SLOT in found:
+            return CARD_IN_SLOT
+        return CARD_ON_NFC if CARD_ON_NFC in found else None
+
+    def probe(self) -> bool:
+        """One round trip to the card on the NFC reader. Records and returns the result."""
+        sc = self.sc
+        ok = False
+        try:
+            if self.handle is None:
+                reader = next((r for r in self.readers if self.kind(r) == CARD_ON_NFC), None)
+                if reader is not None:
+                    hres, handle, protocol = sc.SCardConnect(
+                        self.ctx, reader, sc.SCARD_SHARE_SHARED,
+                        sc.SCARD_PROTOCOL_T0 | sc.SCARD_PROTOCOL_T1)
+                    if hres == sc.SCARD_S_SUCCESS:
+                        self.handle, self.protocol = handle, protocol
+            if self.handle is not None:
+                hres, response = sc.SCardTransmit(self.handle, self.protocol, PROBE_APDU)
+                ok = hres == sc.SCARD_S_SUCCESS and len(response or []) >= 2
+        except Exception:                          # noqa: BLE001 - a failed probe is data
+            ok = False
+        if not ok:
+            # Reconnect next time: after a lost reply the handle may be stale.
+            self.release()
+        self.results = (self.results + [ok])[-self.WINDOW:]
+        return ok
+
+    def reset(self) -> None:
+        self.results = []
+        self.release()
+
+    @property
+    def quality(self) -> int:
+        """Percent of recent probes answered; 0 before the first."""
+        if not self.results:
+            return 0
+        return round(100 * sum(self.results) / len(self.results))
+
+    @property
+    def is_good(self) -> bool:
+        """A full window at GOOD or better, ending in three answers in a row."""
+        return (len(self.results) == self.WINDOW and self.quality >= self.GOOD
+                and all(self.results[-3:]))
+
+    def release(self) -> None:
+        if self.handle is not None:
+            try:
+                self.sc.SCardDisconnect(self.handle, self.sc.SCARD_LEAVE_CARD)
+            except Exception:                      # noqa: BLE001
+                pass
+            self.handle = None
+
+    def close(self) -> None:
+        """Let go of the card and the context, so connect() and pygp can have them."""
+        self.release()
+        if self.ctx is not None:
+            try:
+                self.sc.SCardReleaseContext(self.ctx)
+            except Exception:                      # noqa: BLE001
+                pass
+            self.ctx = None
+
+
 def connect():
     """
     Open a connection to a SeedKeeper card.
@@ -718,11 +887,14 @@ def initialize(connector, pin: str) -> None:
         to reinstall the applet, taking any secret with it.
       - The second PIN slot is unused, so it also gets random bytes.
     """
-    if not pin or not pin.isdigit():
-        raise SeedKeeperError("The PIN must be digits only.")
-    if not PIN_MIN_LENGTH <= len(pin) <= PIN_MAX_LENGTH:
+    # Letters and symbols are fine: the card stores bytes, and Satochip's own
+    # tools allow them. What it stores is the UTF-8 encoding, so that is what the
+    # length limit counts.
+    if not pin or not pin.isprintable():
+        raise SeedKeeperError("The PIN must be printable characters.")
+    if not PIN_MIN_LENGTH <= len(pin.encode("utf-8")) <= PIN_MAX_LENGTH:
         raise SeedKeeperError(
-            f"The PIN must be {PIN_MIN_LENGTH} to {PIN_MAX_LENGTH} digits."
+            f"The PIN must be {PIN_MIN_LENGTH} to {PIN_MAX_LENGTH} characters."
         )
 
     from os import urandom

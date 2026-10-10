@@ -38,9 +38,10 @@ class SettingsMenuView(View):
         if self.visibility == SettingsConstants.VISIBILITY__GENERAL:
             title = _("Settings")
 
-            # Set up the next nested level of menuing
+            # Hardware sits in the main menu rather than below Advanced: the
+            # display and smartcard settings are the ones Custos changes most.
+            button_data.append(self.HARDWARE)
             button_data.append(self.ADVANCED)
-            next_destination = Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__ADVANCED})
 
             button_data.append(self.IO_TEST)
             button_data.append(self.DONATE)
@@ -49,17 +50,11 @@ class SettingsMenuView(View):
         elif self.visibility == SettingsConstants.VISIBILITY__ADVANCED:
             title = _("Advanced")
 
-            # The hardware options nest below "Advanced"
-            button_data.append(self.HARDWARE)
-            next_destination = Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__HARDWARE})
-
         elif self.visibility == SettingsConstants.VISIBILITY__HARDWARE:
             title = "Hardware"
-            next_destination = None
 
         elif self.visibility == SettingsConstants.VISIBILITY__DEVELOPER:
             title = _("Dev Options")
-            next_destination = None
 
         selected_button = 0
         if self.selected_button_option:
@@ -86,15 +81,17 @@ class SettingsMenuView(View):
             if self.visibility == SettingsConstants.VISIBILITY__GENERAL:
                 return Destination(MainMenuView)
             elif self.visibility == SettingsConstants.VISIBILITY__ADVANCED:
-                return Destination(SettingsMenuView)
+                return Destination(SettingsMenuView, view_args={"selected_button_option": self.ADVANCED})
+            elif self.visibility == SettingsConstants.VISIBILITY__HARDWARE:
+                return Destination(SettingsMenuView, view_args={"selected_button_option": self.HARDWARE})
             else:
                 return Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__ADVANCED})
         
         if button_data[selected_menu_num] == self.ADVANCED:
-            return next_destination
+            return Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__ADVANCED})
 
         elif button_data[selected_menu_num] == self.HARDWARE:
-            return next_destination
+            return Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__HARDWARE})
 
         elif button_data[selected_menu_num] == self.IO_TEST:
             return Destination(IOTestView)

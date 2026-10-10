@@ -7,7 +7,7 @@ from gettext import gettext as _
 
 from embit.descriptor import Descriptor
 
-from seedsigner.gui.components import FontAwesomeIconConstants, SeedSignerIconConstants
+from seedsigner.gui.components import CustosIconConstants, FontAwesomeIconConstants, SeedSignerIconConstants
 from seedsigner.gui.screens import (RET_CODE__BACK_BUTTON, ButtonListScreen,
     WarningScreen, DireWarningScreen, seed_screens)
 from seedsigner.gui.screens.screen import ButtonOption, ButtonOptionWithoutTranslation
@@ -164,7 +164,7 @@ class LoadSeedView(View):
     TYPE_12WORD = ButtonOption("Enter 12-word seed", FontAwesomeIconConstants.KEYBOARD)
     TYPE_24WORD = ButtonOption("Enter 24-word seed", FontAwesomeIconConstants.KEYBOARD)
     TYPE_ELECTRUM = ButtonOption("Enter Electrum seed", FontAwesomeIconConstants.KEYBOARD)
-    SEEDKEEPER = ButtonOption("From SeedKeeper", FontAwesomeIconConstants.MICROCHIP)
+    SEEDKEEPER = ButtonOption("From SeedKeeper", CustosIconConstants.SMARTCARD)
     CREATE = ButtonOption("Create a seed", SeedSignerIconConstants.PLUS)
 
     def run(self):
@@ -635,7 +635,7 @@ class SeedOptionsView(View):
 class SeedBackupView(View):
     VIEW_WORDS = ButtonOption("View seed words")
     EXPORT_SEEDQR = ButtonOption("Export as SeedQR")
-    SAVE_TO_SEEDKEEPER = ButtonOption("Save to SeedKeeper", FontAwesomeIconConstants.MICROCHIP)
+    SAVE_TO_SEEDKEEPER = ButtonOption("Save to SeedKeeper", CustosIconConstants.SMARTCARD)
 
     def __init__(self, seed: Seed):
         super().__init__()

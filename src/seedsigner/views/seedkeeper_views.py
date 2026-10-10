@@ -14,7 +14,7 @@ import logging
 
 from gettext import gettext as _
 
-from seedsigner.gui.components import FontAwesomeIconConstants, SeedSignerIconConstants
+from seedsigner.gui.components import CustosIconConstants, SeedSignerIconConstants
 from seedsigner.gui.screens import RET_CODE__BACK_BUTTON
 from seedsigner.gui.screens.screen import (
     ButtonListScreen, ButtonOption, DireWarningScreen, LoadingScreenThread,
@@ -61,6 +61,36 @@ def _show_success(view, title: str, text: str):
     return Destination(MainMenuView)
 
 
+def _wait_for_card(view) -> bool:
+    """
+    Show "insert a card or hold it to the reader" until one of them happens.
+
+    Returns False if the user backed out. If the readers cannot be watched at
+    all, returns True straight away: the card operation that follows will fail
+    with the diagnosis (pcscd state, tty, ...) that this screen has no room for.
+    """
+    from seedsigner.gui.screens.seedkeeper_screens import CardWaitScreen
+
+    loading = LoadingScreenThread(text=_("Starting readers..."))
+    loading.start()
+    try:
+        seedkeeper.prepare_readers()
+        watch = seedkeeper.CardWatch()
+    finally:
+        loading.stop()
+
+    try:
+        if not watch.usable:
+            return True
+        slot, nfc = seedkeeper.enabled_readers()
+        ret = view.run_screen(CardWaitScreen, watch=watch,
+                              slot_enabled=slot, nfc_enabled=nfc)
+        return ret != RET_CODE__BACK_BUTTON
+    finally:
+        # Hand the card over: connect() and pygp open their own connections.
+        watch.close()
+
+
 def _wrap_capname(name: str) -> str:
     """
     Break a .cap filename at its hyphens so it fits the screen, losing nothing.
@@ -94,7 +124,7 @@ def _wrap_capname(name: str) -> str:
 class SmartcardMenuView(View):
     """Top of the smartcard tree, reached from the Tools menu."""
 
-    LOAD_SEED = ButtonOption("Load seed from card", FontAwesomeIconConstants.MICROCHIP)
+    LOAD_SEED = ButtonOption("Load seed from card", CustosIconConstants.SMARTCARD)
     INITIALIZE = ButtonOption("Set up new card")
     INSTALL = ButtonOption("Install applet")
     UNINSTALL = ButtonOption("Uninstall applet")
@@ -137,6 +167,9 @@ class InitializeCardView(View):
     def run(self):
         from seedsigner.gui.screens.seedkeeper_screens import SeedKeeperPinEntryScreen
 
+        if not _wait_for_card(self):
+            return Destination(BackStackView)
+
         connector = None
         try:
             loading = LoadingScreenThread(text=_("Reading card..."))
@@ -157,9 +190,9 @@ class InitializeCardView(View):
                 return Destination(BackStackView)
             if not pin:
                 return self._warn(_("No PIN entered."))
-            if not seedkeeper.PIN_MIN_LENGTH <= len(pin) <= seedkeeper.PIN_MAX_LENGTH:
+            if not seedkeeper.PIN_MIN_LENGTH <= len(pin.encode("utf-8")) <= seedkeeper.PIN_MAX_LENGTH:
                 return self._warn(
-                    _("A PIN must be {lo} to {hi} digits.\n\nNothing was "
+                    _("A PIN must be {lo} to {hi} characters.\n\nNothing was "
                       "changed.").format(lo=seedkeeper.PIN_MIN_LENGTH,
                                          hi=seedkeeper.PIN_MAX_LENGTH)
                 )
@@ -235,6 +268,9 @@ class SeedKeeperSelectView(View):
 
     def run(self):
         from seedsigner.gui.screens.seedkeeper_screens import SeedKeeperPinEntryScreen
+
+        if not _wait_for_card(self):
+            return Destination(BackStackView)
 
         loading = LoadingScreenThread(text=_("Reading card..."))
         connector = None
@@ -454,6 +490,9 @@ class InstallAppletView(View):
         if ret == RET_CODE__BACK_BUTTON:
             return Destination(BackStackView)
 
+        if not _wait_for_card(self):
+            return Destination(BackStackView)
+
         pygp_module = None
         install_error = None
         state = seedkeeper.UNCONFIRMED
@@ -559,6 +598,9 @@ class UninstallAppletView(View):
     """
 
     def run(self):
+        if not _wait_for_card(self):
+            return Destination(BackStackView)
+
         pygp_module = None
 
         try:
@@ -751,6 +793,9 @@ class ExportSeedToCardView(View):
         if "is_back_button" in ret:
             return Destination(BackStackView)
         label = (ret.get("passphrase") or "").strip() or fingerprint
+
+        if not _wait_for_card(self):
+            return Destination(BackStackView)
 
         connector = None
         loading = LoadingScreenThread(text=_("Reading card..."))
