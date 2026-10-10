@@ -27,7 +27,8 @@ class ToolsMenuView(View):
     SMARTCARD = ButtonOption("Smartcard", CustosIconConstants.SMARTCARD)
 
     def run(self):
-        button_data = [self.IMAGE, self.DICE, self.KEYBOARD, self.ADDRESS_EXPLORER, self.VERIFY_ADDRESS, self.SMARTCARD]
+        # Smartcard first: Custos is built around SeedKeeper cards.
+        button_data = [self.SMARTCARD, self.IMAGE, self.DICE, self.KEYBOARD, self.ADDRESS_EXPLORER, self.VERIFY_ADDRESS]
 
         selected_menu_num = self.run_screen(
             ButtonListScreen,
@@ -43,7 +44,9 @@ class ToolsMenuView(View):
             return Destination(ToolsImageEntropyLivePreviewView)
 
         elif button_data[selected_menu_num] == self.DICE:
-            return Destination(ToolsDiceEntropyMnemonicLengthView)
+            # Enter the rolls by hand, or scan them with the camera.
+            from .dice_scan_views import ToolsDiceEntropyMethodView
+            return Destination(ToolsDiceEntropyMethodView)
 
         elif button_data[selected_menu_num] == self.KEYBOARD:
             return Destination(ToolsCalcFinalWordNumWordsView)

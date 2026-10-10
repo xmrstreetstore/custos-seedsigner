@@ -74,7 +74,9 @@ class Camera(Singleton):
             raise CameraConnectionError()
 
 
-    def capture_frame(self):
+    def capture_frame(self, expand: bool = False):
+        # expand: keep the whole frame when rotating a non-square capture (the
+        # dice scanner shoots 4:3); square captures are unaffected either way.
         if self._picamera is None:
             raise Exception("Must call start_single_frame_mode first.")
 
@@ -90,7 +92,7 @@ class Camera(Singleton):
 
         # "Rewind" the stream to the beginning so we can read its content
         stream.seek(0)
-        return Image.open(stream).rotate(90 + self._camera_rotation)
+        return Image.open(stream).rotate(90 + self._camera_rotation, expand=expand)
 
 
     def stop_single_frame_mode(self):

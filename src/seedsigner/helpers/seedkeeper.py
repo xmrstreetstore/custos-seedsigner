@@ -883,8 +883,9 @@ def initialize(connector, pin: str) -> None:
         forgotten, is set to 16 random bytes that are then discarded. That is
         upstream's deliberate choice - their comment is that the PUK "is not used
         currently and is not user friendly". The consequence is real: after
-        PIN_TRIES wrong attempts the card locks for good and the only way back is
-        to reinstall the applet, taking any secret with it.
+        PIN_TRIES wrong attempts verify_pin wipes the card, taking any secret
+        with it. That one-try PUK is what makes the wipe possible (see
+        wipe_locked_card).
       - The second PIN slot is unused, so it also gets random bytes.
     """
     # Letters and symbols are fine: the card stores bytes, and Satochip's own
@@ -927,17 +928,103 @@ def initialize(connector, pin: str) -> None:
         )
 
 
+#: Wrong recovery-code (PUK) guesses to try when wiping a locked card. Cards set
+#: up here allow one; Satochip's own tools may allow more.
+WIPE_MAX_PUK_GUESSES = 32
+
+
 def verify_pin(connector, pin: str) -> None:
-    """Present the PIN. Raises SeedKeeperError describing what the card said."""
+    """
+    Present the PIN. Raises SeedKeeperError describing what the card said.
+
+    A wrong PIN reports the tries the card itself has left, so the count follows
+    the card, not this device: it survives a reboot and a different Custos. When
+    the card has none left it is wiped (see wipe_locked_card).
+
+    pysatochip's card_verify_PIN cannot be trusted to raise on every refusal: a
+    PIN outside the card's 4-16 byte policy gets 9C0F, which it returns quietly,
+    and the next command then failed with "Device cannot be unlocked without PIN
+    code". So success is judged on the status word, never on "did not raise".
+    """
+    from pysatochip.CardConnector import IdentityBlockedError
+
     try:
-        connector.card_verify_PIN(pin)
+        _resp, sw1, sw2 = connector.card_verify_PIN(pin)
+        if (sw1, sw2) == (0x90, 0x00):
+            return
+        left = _pin_tries_left(connector)
+    except IdentityBlockedError:
+        left = 0
     except Exception as exc:                       # noqa: BLE001
         left = getattr(exc, "pin_left", None)
-        if left is not None:
-            raise SeedKeeperError(
-                f"Wrong PIN.\n\n{left} attempt(s) left before the card is blocked."
-            ) from exc
-        raise SeedKeeperError(f"PIN rejected:\n{exc}") from exc
+        if left is None:
+            raise SeedKeeperError(f"PIN rejected:\n{exc}") from exc
+
+    if left is None or left < 0:               # pysatochip reports -1 for unknown
+        raise SeedKeeperError("Incorrect PIN!")
+    if left > 0:
+        if left > PIN_TRIES:                       # set up elsewhere with more
+            raise SeedKeeperError(f"Incorrect PIN!\n\n{left} attempts left")
+        # Five lines is all a 240x240 warning screen shows above its button.
+        msg = f"Incorrect PIN!\n\n{left}/{PIN_TRIES} attempts left"
+        if left == 1:
+            msg += ".\nNext wrong PIN wipes the card."
+        raise SeedKeeperError(msg)
+
+    if wipe_locked_card(connector):
+        raise SeedKeeperError(
+            "Incorrect PIN!\n\nToo many wrong PINs:\nthe card is wiped.\n"
+            "Set it up again."
+        )
+    raise SeedKeeperError(
+        "Incorrect PIN!\n\nCard locked after too many wrong PINs. Could not "
+        "wipe it."
+    )
+
+
+def _pin_tries_left(connector):
+    """PIN tries the card has left, or None if it will not say."""
+    try:
+        _resp, _sw1, _sw2, status = connector.card_get_status()
+        left = status.get("PIN0_remaining_tries")
+        return int(left) if left is not None else None
+    except Exception:                              # noqa: BLE001
+        return None
+
+
+def wipe_locked_card(connector) -> bool:
+    """
+    Factory-reset a card whose PIN is blocked. Returns True if the card wiped.
+
+    SeedKeeper 0.2 has no plain "erase" command. It wipes itself, secrets and
+    PIN, when its PIN is blocked and its recovery code (PUK) is then also
+    exhausted: the last wrong PUK answers FF00 and the card is back to
+    unset-up. Cards set up here have a random, discarded PUK with one try, so a
+    single random guess does it. A card set up by Satochip's own tools may allow
+    several, hence the loop. Every guess is 16 random bytes, so none will match a
+    real PUK.
+    """
+    from os import urandom
+    from pysatochip.CardConnector import (
+        CardResetToFactoryError, PinBlockedError, WrongPinError)
+
+    for _ in range(WIPE_MAX_PUK_GUESSES):
+        try:
+            _resp, sw1, sw2 = connector.card_unblock_PIN(0, list(urandom(16)))
+        except CardResetToFactoryError:
+            return True
+        except WrongPinError:
+            continue
+        except PinBlockedError:            # PUK already gone: the card cannot reset
+            return False
+        except Exception:                          # noqa: BLE001
+            logger.exception("wiping the locked card failed")
+            return False
+        # Anything the library did not turn into an exception, e.g. 9C03 when
+        # the PIN is not actually blocked. Nothing to wipe; stop either way.
+        logger.warning("wipe: card answered %02X%02X", sw1, sw2)
+        return False
+    return False
 
 
 def list_importable(connector):
