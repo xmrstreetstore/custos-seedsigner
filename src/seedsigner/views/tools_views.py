@@ -44,9 +44,7 @@ class ToolsMenuView(View):
             return Destination(ToolsImageEntropyLivePreviewView)
 
         elif button_data[selected_menu_num] == self.DICE:
-            # Enter the rolls by hand, or scan them with the camera.
-            from .dice_scan_views import ToolsDiceEntropyMethodView
-            return Destination(ToolsDiceEntropyMethodView)
+            return Destination(ToolsDiceEntropyMnemonicLengthView)
 
         elif button_data[selected_menu_num] == self.KEYBOARD:
             return Destination(ToolsCalcFinalWordNumWordsView)
