@@ -1,5 +1,7 @@
 # Custos OS — app
 
+*custōs* · Latin for **guardian, keeper**, the root of the word *custody*.
+
 **An air-gapped bitcoin signer that keeps your seed on a PIN-protected SeedKeeper
 smartcard, and remembers nothing once it powers off.**
 
