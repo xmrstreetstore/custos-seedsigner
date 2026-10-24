@@ -10,22 +10,28 @@ one without recording where it came from.
 
 | File | Source | SHA256 |
 |---|---|---|
-| `SeedKeeper-0.2-official.cap` | [3rdIteration/seedsigner](https://github.com/3rdIteration/seedsigner) `javacard-cap/`, from Satochip's official release | `28dbae3c7c130a6f7d0e6d05f41386ffd93976fd290eaa5d8db708b9903dabcd` |
+| `SeedKeeper-0.2-official.cap` | Satochip's official release [Seedkeeper-Applet v0.2-0.1](https://github.com/Toporin/Seedkeeper-Applet/releases/tag/v0.2-0.1) (`SeedKeeper-v0.2-0.1.cap`), imported via [3rdIteration/seedsigner](https://github.com/3rdIteration/seedsigner) `javacard-cap/` | `28dbae3c7c130a6f7d0e6d05f41386ffd93976fd290eaa5d8db708b9903dabcd` |
 
 Checked against the upstream `javacard-cap.sha256` manifest when imported, and it
-matched. `javacard-cap.sha256` here is the upstream manifest reduced to what we ship.
+matched. Re-checked on 2026-10-24 against the file attached to Satochip's own GitHub
+release: byte-identical. `javacard-cap.sha256` here is the upstream manifest reduced to what we ship.
 
 ### Deliberately not shipped
 
-The NDEF variant was bundled at first and then dropped, because everything it adds
-is for contactless use and this device has no NFC: the SEC1210 is a contact reader
-on `/dev/ttyAMA0`. Offering it in the install menu meant offering a second,
-near-identically named applet that nothing here can talk to over the air.
+The NDEF variant (`SeedKeeper-Ndef-v0.2-0.1.cap` in the same release) is not
+bundled. It adds an NDEF tag for phone apps; Custos talks to the card over the
+PN532 as a plain contactless smartcard and does not need it. If you want it on a
+card, put the `.cap` on the microSD (see below) or restore it with
+`git checkout fbc4de51 -- javacard-cap/SeedKeeper-Ndef-v0.2-0.1.cap` (and add its hash to the manifest). Its SHA256 is
+`ef776360415ee0c64881b1e36339ffba815231aab2406014559d18fdaa632c9b`.
 
-If the PN532 is ever fitted, restore it with `git show fbc4de51 --` and put its row
-back. Its provenance was the same upstream directory, NDEF variant, SHA256
-`ef776360415ee0c64881b1e36339ffba815231aab2406014559d18fdaa632c9b`. Nothing else
-needs changing: the install menu lists whatever `.cap` files it finds.
+## Licence and source
+
+The SeedKeeper applet is Satochip's work and is licensed **AGPL-3.0**, separately
+from this repository's MIT licence. The `.cap` here is the unmodified binary from
+the release above. Its complete corresponding source is the
+[`v0.2-0.1` tag of Toporin/Seedkeeper-Applet](https://github.com/Toporin/Seedkeeper-Applet/tree/v0.2-0.1),
+and the licence text is in that repository's `LICENSE` file.
 
 ```bash
 cd javacard-cap && sha256sum -c javacard-cap.sha256
